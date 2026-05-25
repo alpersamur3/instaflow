@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# Chrome session profiles (contain auth tokens — do not commit)
+sessions/
+
+# test output & temp
+artifacts/
+test_image.jpg
+test_photo.png
+
+# test & example files (local dev only)
+tests/
+full_test.js
+example.js
+example_*.js
+
+# logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/
+.idea/
+*.swp

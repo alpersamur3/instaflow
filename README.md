@@ -1,0 +1,357 @@
+<div align="center">
+
+# 🌊 InstaFlow
+
+**Headless Instagram automation for Node.js — powered by Playwright.**  
+No API key. No OAuth. Just a real browser session, human-like behaviour, and a clean async API.
+
+[![npm version](https://img.shields.io/npm/v/instaflow?color=CB3837&logo=npm)](https://www.npmjs.com/package/instaflow)
+[![npm downloads](https://img.shields.io/npm/dm/instaflow?color=blue)](https://www.npmjs.com/package/instaflow)
+[![license](https://img.shields.io/npm/l/instaflow?color=green)](LICENSE)
+[![node](https://img.shields.io/node/v/instaflow)](package.json)
+
+</div>
+
+---
+
+## ✨ Features
+
+| Category | Actions |
+|---|---|
+| **Publishing** | Post photo/video, upload story |
+| **Engagement** | Like, unlike, comment, save, unsave |
+| **Social** | Follow, unfollow, send DM, react to story |
+| **Scraping** | Profile stats, post stats, comments, followers/following, search, hashtag posts, inbox |
+| **Safety** | Built-in rate limiter, human-like delays, anti-detection stealth, persistent sessions |
+
+---
+
+## 📦 Installation
+
+```bash
+npm install instaflow
+npx playwright install chromium
+```
+
+> Only the Chromium browser binary is needed.
+
+---
+
+## 🚀 Quick Start
+
+```js
+const InstaFlow = require('instaflow');
+
+const bot = new InstaFlow({
+  sessionDir: './my-session',   // persists login — no re-auth needed
+  headless: true,
+  humanize: true,               // random human-like delays between actions
+});
+
+bot.on('ready', async () => {
+  // Get your own profile stats
+  const me = await bot.getMyStats();
+  console.log(`@${me.username} — ${me.followers} followers`);
+
+  // Like a post
+  await bot.likePost('https://www.instagram.com/p/SHORTCODE/');
+
+  // Post a photo with caption
+  await bot.post('Hello from InstaFlow 🌊', {
+    media: ['./photo.jpg'],
+  });
+
+  await bot.close();
+});
+
+bot.init();
+```
+
+---
+
+## 🔐 Authentication
+
+### Persistent Session (recommended)
+
+The easiest way — log in once via browser, then reuse the session forever:
+
+```js
+const bot = new InstaFlow({
+  sessionDir: './sessions/my_account',
+  headless: false,   // show browser for first login
+});
+```
+
+Launch the bot, log in manually in the browser window that opens, then switch `headless: true` for all future runs. The session is stored in `sessionDir` and survives restarts.
+
+### Credential Login
+
+```js
+const bot = new InstaFlow({
+  username: 'your_username',
+  password: 'your_password',
+  sessionDir: './sessions/my_account',  // saves session after first login
+});
+```
+
+### Cookie Auth
+
+```js
+const bot = new InstaFlow({
+  cookies: {
+    sessionid:  'xxxx',
+    csrftoken:  'yyyy',
+    ds_user_id: 'zzzz',
+  },
+});
+```
+
+---
+
+## 📖 API Reference
+
+All methods are `async` and resolve when the action completes.
+
+### `bot.init()` → `InstaFlow`
+Launch the browser and authenticate. Emits `ready` when done.
+
+### `bot.close()`
+Close browser and release all resources.
+
+---
+
+### Read — Profile
+
+#### `bot.getMyStats()` → `ProfileStats`
+Returns the logged-in account's stats (followers, following, posts, bio, avatar).
+
+#### `bot.getProfile(username)` → `ProfileStats`
+Returns public profile stats for any account.
+
+```js
+const profile = await bot.getProfile('nasa');
+// { username, fullName, bio, followers, following, posts, avatarUrl, isPrivate, isVerified }
+```
+
+---
+
+### Read — Posts & Comments
+
+#### `bot.getUserPosts(username, count?)` → `{ posts, count }`
+Scrape up to `count` (default 12) post URLs + shortcodes from a profile grid.
+
+#### `bot.getPostStats(postUrl)` → `PostStats`
+Return likes, comment count, caption, author, and publish date for a post.
+
+#### `bot.getPostComments(postUrl, count?)` → `Comment[]`
+Scrape up to `count` comments with username + text + timestamp.
+
+---
+
+### Read — Social Graph
+
+#### `bot.getFollowers(username, count?)` → `User[]`
+#### `bot.getFollowing(username, count?)` → `User[]`
+Scrape followers / following lists. Returns `{ username, avatar, fullName }[]`.
+
+---
+
+### Read — Discovery
+
+#### `bot.search(query)` → `{ users, hashtags, places }`
+Global search — returns user suggestions, hashtag suggestions, and place results.
+
+#### `bot.searchUsers(query)` → `User[]`
+Search users only.
+
+#### `bot.getHashtagPosts(hashtag, count?)` → `Post[]`
+Scrape the top posts under a hashtag.
+
+---
+
+### Read — Inbox
+
+#### `bot.getInbox(count?)` → `{ threads }`
+List DM threads with last-message preview.
+
+#### `bot.getMessages(threadId, count?)` → `{ messages }`
+Read messages in a specific thread.
+
+---
+
+### Write — Publishing
+
+#### `bot.post(caption, options?)` → `PostResult`
+Publish a photo or video post.
+
+```js
+await bot.post('Check this out! #photography', {
+  media: ['./photo.jpg'],      // local file path(s)
+});
+```
+
+#### `bot.postStory(mediaPath)` → `StoryResult`
+Publish a story from a local image or video file.
+
+---
+
+### Write — Engagement
+
+#### `bot.likePost(postUrl)` → `Result`
+#### `bot.unlikePost(postUrl)` → `Result`
+Like / remove like from a post.
+
+#### `bot.savePost(postUrl)` → `Result`
+#### `bot.unsavePost(postUrl)` → `Result`
+Bookmark / remove bookmark from a post.
+
+#### `bot.comment(postUrl, text)` → `CommentResult`
+Post a comment on a post.
+
+---
+
+### Write — Social
+
+#### `bot.followUser(username)` → `Result`
+#### `bot.unfollowUser(username)` → `Result`
+Follow / unfollow an account.
+
+#### `bot.sendDM(username, message)` → `DMResult`
+Send a direct message to a user.
+
+#### `bot.reactToStory(username, emoji)` → `Result`
+React to a user's active story with an emoji.
+
+---
+
+### Utility
+
+#### `bot.getRateLimitStatus()` → `RateLimitStatus`
+See hourly / daily usage vs configured caps for every action type.
+
+---
+
+## ⚙️ Configuration
+
+```js
+const bot = new InstaFlow({
+  // Auth
+  sessionDir: './sessions/account',
+  username:   'your_username',
+  password:   'your_password',
+
+  // Browser
+  headless:   true,
+  timeout:    60000,   // ms per page action
+
+  // Proxy (optional)
+  proxy: {
+    host:     'proxy.example.com',
+    port:     8080,
+    protocol: 'http',      // or 'socks5'
+    username: 'user',
+    password: 'pass',
+  },
+
+  // Behaviour
+  humanize: true,   // random delays between actions
+
+  // Rate limits (override defaults)
+  rateLimits: {
+    like:    { hour: 20, day: 100 },
+    comment: { hour: 10, day: 40  },
+    follow:  { hour: 5,  day: 20  },
+    // post | story | like | comment | follow | unfollow | dm
+  },
+});
+```
+
+**Default rate limits:**
+
+| Action | Per hour | Per day |
+|--------|----------|---------|
+| post | 3 | 10 |
+| story | 5 | 15 |
+| like | 30 | 150 |
+| comment | 15 | 60 |
+| follow | 10 | 40 |
+| unfollow | 10 | 40 |
+| dm | 10 | 40 |
+
+---
+
+## 📡 Events
+
+```js
+bot.on('ready',            ()       => console.log('Bot is ready'));
+bot.on('loginRequired',    ()       => console.log('Need to log in'));
+bot.on('error',            (err)    => console.error('Error:', err));
+bot.on('rateLimitHit',     (info)   => console.warn('Rate limit:', info));
+bot.on('actionBlocked',    (info)   => console.warn('Blocked:', info));
+bot.on('challengeRequired',()       => console.warn('Challenge triggered'));
+bot.on('postLiked',        (result) => console.log('Liked:', result));
+bot.on('postCommented',    (result) => console.log('Commented:', result));
+bot.on('userFollowed',     (result) => console.log('Followed:', result));
+bot.on('userUnfollowed',   (result) => console.log('Unfollowed:', result));
+bot.on('postPublished',    (result) => console.log('Published:', result));
+bot.on('storyPublished',   (result) => console.log('Story up:', result));
+bot.on('dmSent',           (result) => console.log('DM sent:', result));
+```
+
+---
+
+## 🛡️ Anti-Detection
+
+InstaFlow uses several techniques to reduce detection risk:
+
+- **Stealth flags** — `--disable-blink-features=AutomationControlled`, patched `navigator.webdriver`
+- **Persistent Chrome profile** — same fingerprint across runs, no fresh-browser tells
+- **Human delays** — configurable random pauses between interactions (`humanize: true`)
+- **Rate limiting** — built-in hourly/daily caps prevent sudden bursts
+- **Real browser** — Playwright drives Chromium, indistinguishable from a real user session
+
+> ⚠️ This library is intended for personal use, research, and testing. Using automation on Instagram may violate their Terms of Service. Use responsibly and at your own risk.
+
+---
+
+## 🗂️ Project Structure
+
+```
+instaflow/
+├── index.js          # Main library (InstagramBot class)
+├── example.js        # Basic usage example
+├── example_publish.js
+├── example_interaction.js
+├── tests/
+│   ├── run.js        # Test orchestrator (node tests/run.js)
+│   ├── _helpers.js
+│   ├── test_profile.js
+│   ├── test_search.js
+│   ├── test_followers.js
+│   ├── test_post_meta.js
+│   ├── test_like.js
+│   ├── test_save.js
+│   ├── test_comment.js
+│   └── test_post.js
+└── sessions/         # Chrome profile directories (gitignored)
+```
+
+---
+
+## 🤝 Contributing
+
+Pull requests are welcome. For major changes, please open an issue first.
+
+```bash
+git clone https://github.com/alpersamur3/instaflow.git
+cd instaflow
+npm install
+npx playwright install chromium
+node tests/run.js
+```
+
+---
+
+## 📄 License
+
+[MIT](LICENSE) © 2026 alpersamur3

@@ -1,0 +1,56 @@
+{
+  "name": "instaflow",
+  "version": "1.0.0",
+  "description": "Headless Instagram automation powered by Playwright. Persistent sessions, human-like delays, built-in rate limiter. Post, story, like, comment, follow, DM, scrape and more — no API key required.",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "example": "node example.js",
+    "test": "node tests/run.js"
+  },
+  "keywords": [
+    "instagram",
+    "instagram-bot",
+    "instagram-automation",
+    "instagram-scraper",
+    "instagram-api",
+    "playwright",
+    "headless",
+    "social-media",
+    "social-media-bot",
+    "social-media-automation",
+    "auto-like",
+    "auto-follow",
+    "auto-comment",
+    "dm-bot",
+    "story",
+    "web-scraping",
+    "browser-automation",
+    "rate-limiter",
+    "anti-detection",
+    "stealth"
+  ],
+  "author": "alpersamur3",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alpersamur3/instaflow.git"
+  },
+  "homepage": "https://github.com/alpersamur3/instaflow#readme",
+  "bugs": {
+    "url": "https://github.com/alpersamur3/instaflow/issues"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  },
+  "peerDependencies": {
+    "playwright": ">=1.40.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

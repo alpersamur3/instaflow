@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# Chrome session profiles (contain auth tokens — never publish)
+sessions/
+
+# test artifacts & temp files
+artifacts/
+test_image.jpg
+tests/
+
+# example scripts
+example.js
+example_publish.js
+example_interaction.js
+full_test.js
+
+# misc
+.git/
+*.log
+*.tmp
