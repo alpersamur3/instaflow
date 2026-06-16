@@ -16,8 +16,13 @@ example.js
 example_*.js
 
 # logs
+logs/
 *.log
 npm-debug.log*
+
+# local tooling / runtime
+.mcp.json
+.claude/
 
 # OS
 .DS_Store

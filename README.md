@@ -20,8 +20,10 @@ No API key. No OAuth. Just a real browser session, human-like behaviour, and a c
 |---|---|
 | **Publishing** | Post photo/video, upload story |
 | **Engagement** | Like, unlike, comment, save, unsave |
-| **Social** | Follow, unfollow, send DM, react to story |
+| **Social** | Follow, unfollow, send DM, view & react to story |
 | **Scraping** | Profile stats, post stats, comments, followers/following, search, hashtag posts, inbox |
+| **Reels** | Scrape the reels feed, enriched reel stats + cover thumbnail, best-effort reel video download |
+| **Session** | Export raw cookies (e.g. for `yt-dlp`) |
 | **Safety** | Built-in rate limiter, human-like delays, anti-detection stealth, persistent sessions |
 
 ---
@@ -179,6 +181,24 @@ Read messages in a specific thread.
 
 ---
 
+### Read — Reels
+
+#### `bot.getReelsFeed(count?)` → `Reel[]`
+Advance through the real reels feed (`instagram.com/reels/`) and collect reel shortcodes. Returns `{ shortcode, type: 'reel', url }[]`.
+
+#### `bot.getReelStats(postUrl)` → `ReelStats`
+Enriched stats for a reel (or any post): cover **thumbnail** (suitable for multimodal AI analysis), play/view count, likes, comments, caption, author, and the raw `videoSrc` when present.
+
+```js
+const reel = await bot.getReelStats('https://www.instagram.com/reel/SHORTCODE/');
+// { author, caption, thumbnail, videoSrc, plays, likes, comments, publishedAt }
+```
+
+#### `bot.downloadReel(postUrl, destPath)` → `{ path, url, bytes }`
+Best-effort download of a reel's video file to `destPath`. Instagram serves reels via MSE/blob + ranged CDN, so success isn't guaranteed — it tries the `og:video` progressive MP4, then the `<video>` source, then the largest captured `.mp4` network response.
+
+---
+
 ### Write — Publishing
 
 #### `bot.post(caption, options?)` → `PostResult`
@@ -228,6 +248,9 @@ React to a user's active story with an emoji.
 
 #### `bot.getRateLimitStatus()` → `RateLimitStatus`
 See hourly / daily usage vs configured caps for every action type.
+
+#### `bot.getCookies()` → `Cookie[]`
+Return the current session cookies in Playwright format — handy for exporting an authenticated session to external tools like `yt-dlp`.
 
 ---
 
@@ -318,23 +341,28 @@ InstaFlow uses several techniques to reduce detection risk:
 
 ```
 instaflow/
-├── index.js          # Main library (InstagramBot class)
+├── index.js          # Entry: InstagramBot class + mixin assembly (module.exports)
+├── src/              # Implementation, split by concern
+│   ├── constants.js  # User-agent, viewport, default rate limits
+│   ├── utils.js      # delay() and shared helpers
+│   ├── auth.js       # init / login / close (browser lifecycle)
+│   ├── safety.js     # humanize, rate limiting, block detection, guards
+│   ├── content.js    # post / story / profile editing (publishing)
+│   ├── engagement.js # comment / like / save / bulk hashtag like
+│   ├── social.js     # follow / unfollow / DM / story interactions
+│   └── insights.js   # profile / post / reel scraping, search, inbox, download
 ├── example.js        # Basic usage example
 ├── example_publish.js
 ├── example_interaction.js
 ├── tests/
 │   ├── run.js        # Test orchestrator (node tests/run.js)
-│   ├── _helpers.js
-│   ├── test_profile.js
-│   ├── test_search.js
-│   ├── test_followers.js
-│   ├── test_post_meta.js
-│   ├── test_like.js
-│   ├── test_save.js
-│   ├── test_comment.js
-│   └── test_post.js
+│   └── test_*.js
 └── sessions/         # Chrome profile directories (gitignored)
 ```
+
+> The public API is a single class (`require('instaflow')`). Internally it's
+> composed from the `src/` modules via `Object.assign(prototype, ...)`, so every
+> method shares the same `this` (page, context, rate-limiter state).
 
 ---
 
