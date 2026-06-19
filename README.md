@@ -10,6 +10,8 @@ No API key. No OAuth. Just a real browser session, human-like behaviour, and a c
 [![license](https://img.shields.io/npm/l/instaflow?color=green)](LICENSE)
 [![node](https://img.shields.io/node/v/instaflow)](package.json)
 
+**🌐 English** · [Türkçe](README.tr.md)
+
 </div>
 
 ---
@@ -18,7 +20,7 @@ No API key. No OAuth. Just a real browser session, human-like behaviour, and a c
 
 | Category | Actions |
 |---|---|
-| **Publishing** | Post photo/video, upload story, edit profile (name/bio/website/avatar) |
+| **Publishing** | Post photo/video, upload story, edit profile (name/bio/website/avatar), delete post |
 | **Engagement** | Like, unlike, comment, save, unsave |
 | **Social** | Follow, unfollow, send DM, view & react to story |
 | **Scraping** | Profile stats, post stats, comments, followers/following, search, hashtag posts, inbox |
@@ -128,11 +130,11 @@ Close browser and release all resources.
 Returns the logged-in account's stats (followers, following, posts, bio, avatar).
 
 #### `bot.getProfile(username)` → `ProfileStats`
-Returns public profile stats for any account.
+Returns public profile stats for any account. Uses Instagram's `web_profile_info` JSON API as the primary source (DOM scrape as fallback), so full name, bio, counts, verified badge and external URL are accurate.
 
 ```js
 const profile = await bot.getProfile('nasa');
-// { username, fullName, bio, followers, following, posts, avatarUrl, isPrivate, isVerified }
+// { username, fullName, bio, followers, following, posts, avatarUrl, isPrivate, isVerified, externalUrl }
 ```
 
 ---
@@ -348,6 +350,7 @@ bot.on('postFailed',       (info)   => console.warn('Post failed:', info));
 bot.on('storyPublished',   (result) => console.log('Story up:', result));
 bot.on('storyFailed',      (info)   => console.warn('Story failed:', info));
 bot.on('profileSetup',     (result) => console.log('Profile updated:', result));
+bot.on('postDeleted',      (result) => console.log('Post deleted:', result));
 bot.on('dmSent',           (result) => console.log('DM sent:', result));
 ```
 

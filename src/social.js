@@ -164,70 +164,50 @@ module.exports = {
     const normalizedUser = username.replace(/^@/, "");
 
     try {
-      // 1. Go to messages list directly
-      await this.page.goto("https://www.instagram.com/direct/inbox/", { waitUntil: "domcontentloaded" });
+      // Open the user's profile and click "Message" — this opens an inline chat
+      // overlay with a contenteditable message box. (Instagram's standalone
+      // /direct/new/ composer changes frequently and dropped the old "Chat"
+      // confirm step; the profile "Message" button is the stable entry point.)
+      await this.page.goto(`https://www.instagram.com/${normalizedUser}/`, { waitUntil: "domcontentloaded" });
+      await delay(3500);
+      await this._dismissDialogs();
+
+      const exists = await this.page.evaluate(() =>
+        !document.body.innerText.includes("Sorry, this page isn't available") &&
+        !document.body.innerText.includes("Üzgünüz, bu sayfaya ulaşılamıyor")
+      );
+      if (!exists) {
+        throw new Error(`Instagram user @${normalizedUser} not found`);
+      }
+
+      const msgBtn = this.page.locator(
+        'div[role="button"]:has-text("Message"), button:has-text("Message"), ' +
+        'div[role="button"]:has-text("Mesaj gönder"), button:has-text("Mesaj gönder"), ' +
+        'div[role="button"]:has-text("Mesaj"), button:has-text("Mesaj")'
+      ).first();
+      if (!(await msgBtn.count() > 0)) {
+        throw new Error(`No "Message" button on @${normalizedUser}'s profile — they may not allow DMs from you.`);
+      }
+      await msgBtn.click({ force: true });
       await delay(4000);
+      await this._dismissDialogs();
 
-      // Check and close active alert popups (like "Turn on notifications" etc.)
-      const notNowBtn = await this.page.locator('button:has-text("Not Now"), button:has-text("Şimdi Değil")').first();
-      if (await notNowBtn.isVisible()) {
-        await notNowBtn.click();
-        await delay(1500);
-      }
-
-      // 2. Click "New Message" button
-      // SVG with aria-label="New Message" or "Yeni Mesaj"
-      const newMsgBtn = await this.page.locator('svg[aria-label="New message"], svg[aria-label="Yeni Mesaj"], svg[aria-label*="message" i]').first();
-      if (await newMsgBtn.isVisible()) {
-        await newMsgBtn.locator("xpath=..").click();
-      } else {
-        // Fallback: click "Send Message" if profile page approach is easier
-        await this.page.goto(`https://www.instagram.com/${normalizedUser}/`, { waitUntil: "domcontentloaded" });
-        await delay(3500);
-        const sendMsgBtn = await this.page.locator('div[role="button"]:has-text("Message"), button:has-text("Message"), button:has-text("Mesaj Gönder"), div[role="button"]:has-text("Mesaj Gönder")').first();
-        if (await sendMsgBtn.isVisible()) {
-          await sendMsgBtn.click();
-          await delay(4000);
-        } else {
-          throw new Error("Could not find new message trigger");
-        }
-      }
-
-      // If we clicked "New Message" popup, type username and select
-      const searchInput = await this.page.locator('input[name="query"], input[placeholder*="Search" i], input[placeholder*="Ara" i]').first();
-      if (await searchInput.isVisible()) {
-        await searchInput.type(normalizedUser, { delay: 100 });
-        await delay(3000);
-
-        // Click on the first user matching normalizedUser in the list
-        // Custom checkboxes or list items in selection list
-        const searchResult = await this.page.locator(`span:has-text("${normalizedUser}")`).first();
-        if (await searchResult.isVisible()) {
-          await searchResult.click();
-          await delay(1500);
-
-          // Click "Chat" / "Sohbet" button
-          const chatBtn = await this.page.locator('div[role="button"]:has-text("Chat"), button:has-text("Chat"), button:has-text("Sohbet"), div[role="button"]:has-text("Sohbet")').first();
-          await chatBtn.click();
-          await delay(3000);
-        } else {
-          throw new Error(`User @${normalizedUser} not found in selection list`);
-        }
-      }
-
-      // 3. Locate DM Textarea and send message
-      const dmAreaSelector = 'div[role="textbox"], textarea[placeholder*="Message" i], textarea[placeholder*="Mesaj" i]';
+      // The chat opens inline (overlay) or at /direct/t/…; the input is a
+      // contenteditable textbox (newer) or a textarea (older).
+      const dmAreaSelector =
+        'div[role="textbox"][contenteditable="true"], ' +
+        'textarea[placeholder*="Message" i], textarea[placeholder*="Mesaj" i], ' +
+        'div[aria-label*="Message" i][contenteditable="true"], ' +
+        'div[aria-label*="Mesaj" i][contenteditable="true"]';
       await this.page.waitForSelector(dmAreaSelector, { state: "visible", timeout: 15000 });
 
-      const dmArea = await this.page.locator(dmAreaSelector).first();
+      const dmArea = this.page.locator(dmAreaSelector).first();
       await dmArea.click();
       await delay(500);
-      await dmArea.type(text, { delay: 60 });
-      await delay(1000);
-
-      // Press Enter or click Send
+      await dmArea.type(text, { delay: 50 });
+      await delay(800);
       await dmArea.press("Enter");
-      await delay(2000);
+      await delay(2500);
 
       const result = {
         success: true,
@@ -290,10 +270,31 @@ module.exports = {
       await delay(3500);
       await this._dismissDialogs();
 
-      // The story reply box is a contenteditable / textarea at the bottom
+      // No active story → Instagram redirects away from /stories/.
+      if (!this.page.url().includes("/stories/")) {
+        return { username: normalizedUser, reacted: false, reason: "no_active_story" };
+      }
+
+      // Start playback if a "View story" gate is shown — the reply box only
+      // mounts once the story is actually playing.
+      const viewBtn = this.page.locator(
+        'div[role="button"]:has-text("View story"), div[role="button"]:has-text("Hikayeyi gör")'
+      ).first();
+      if (await viewBtn.isVisible().catch(() => false)) {
+        await viewBtn.click().catch(() => {});
+        await delay(2000);
+      }
+
+      // The story reply box is a contenteditable / textarea at the bottom. If it
+      // never appears (story already ended, or replies are off), bail gracefully
+      // instead of throwing.
       const replySelector = 'textarea[placeholder*="Reply" i], textarea[placeholder*="Yanıtla" i], div[contenteditable="true"][aria-label*="Reply" i], div[contenteditable="true"][aria-label*="Yanıtla" i]';
       const reply = this.page.locator(replySelector).first();
-      await reply.waitFor({ state: "visible", timeout: 10000 });
+      try {
+        await reply.waitFor({ state: "visible", timeout: 8000 });
+      } catch (_) {
+        return { username: normalizedUser, reacted: false, reason: "no_reply_box" };
+      }
       await reply.click();
       await delay(400);
       await reply.type(emoji, { delay: 50 });
@@ -301,7 +302,7 @@ module.exports = {
       await reply.press("Enter");
       await delay(1500);
 
-      const result = { username: normalizedUser, emoji, timestamp: new Date().toISOString() };
+      const result = { username: normalizedUser, reacted: true, emoji, timestamp: new Date().toISOString() };
       this.emit("storyReacted", result);
       return result;
     } catch (err) {
