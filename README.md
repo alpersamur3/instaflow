@@ -18,7 +18,7 @@ No API key. No OAuth. Just a real browser session, human-like behaviour, and a c
 
 | Category | Actions |
 |---|---|
-| **Publishing** | Post photo/video, upload story |
+| **Publishing** | Post photo/video, upload story, edit profile (name/bio/website/avatar) |
 | **Engagement** | Like, unlike, comment, save, unsave |
 | **Social** | Follow, unfollow, send DM, view & react to story |
 | **Scraping** | Profile stats, post stats, comments, followers/following, search, hashtag posts, inbox |
@@ -211,7 +211,28 @@ await bot.post('Check this out! #photography', {
 ```
 
 #### `bot.postStory(mediaPath)` → `StoryResult`
-Publish a story from a local image or video file.
+Publish a story from a local image or video file. Instagram removed story creation from the desktop website, so this spins up a short-lived **mobile-emulated** browser context (seeded with your current session cookies), publishes via the mobile **create (+) → Story** flow, and tears it down — your main session is untouched. (You'll briefly see a second Chromium window when `headless: false`.)
+
+#### `bot.setupProfile(options)` → `ProfileEditResult`
+Update profile metadata on the account-edit page. Every field is optional — only the ones you pass are touched.
+
+```js
+await bot.setupProfile({
+  name:    'InstaFlow Bot',
+  bio:     'Automated with 🌊 InstaFlow',
+  website: 'https://example.com',
+  avatar:  './new-avatar.jpg',   // local image path
+});
+// → { name, bio, website, avatar, saved, timestamp }  (booleans report what was applied)
+```
+
+#### `bot.deletePost(postUrl)` → `Result`
+Delete one of your own posts/reels (opens the post's **…** menu → Delete → confirm).
+
+```js
+await bot.deletePost('https://www.instagram.com/p/SHORTCODE/');
+// → { success: true, postUrl, timestamp }
+```
 
 ---
 
@@ -228,6 +249,9 @@ Bookmark / remove bookmark from a post.
 #### `bot.comment(postUrl, text)` → `CommentResult`
 Post a comment on a post.
 
+#### `bot.searchAndLike(hashtag, count?)` → `{ hashtag, liked, requested }`
+Scrape the top posts under a hashtag and like up to `count` of them (default 5), with randomized delays between likes.
+
 ---
 
 ### Write — Social
@@ -238,6 +262,9 @@ Follow / unfollow an account.
 
 #### `bot.sendDM(username, message)` → `DMResult`
 Send a direct message to a user.
+
+#### `bot.viewStory(username)` → `Result`
+Open and watch a user's currently-active story (registers as a view).
 
 #### `bot.reactToStory(username, emoji)` → `Result`
 React to a user's active story with an emoji.
@@ -317,7 +344,10 @@ bot.on('postCommented',    (result) => console.log('Commented:', result));
 bot.on('userFollowed',     (result) => console.log('Followed:', result));
 bot.on('userUnfollowed',   (result) => console.log('Unfollowed:', result));
 bot.on('postPublished',    (result) => console.log('Published:', result));
+bot.on('postFailed',       (info)   => console.warn('Post failed:', info));
 bot.on('storyPublished',   (result) => console.log('Story up:', result));
+bot.on('storyFailed',      (info)   => console.warn('Story failed:', info));
+bot.on('profileSetup',     (result) => console.log('Profile updated:', result));
 bot.on('dmSent',           (result) => console.log('DM sent:', result));
 ```
 

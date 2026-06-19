@@ -54,6 +54,40 @@ module.exports = {
         throw new Error(`Instagram user @${normalizedUser} not found`);
       }
 
+      // ── Primary: Instagram's web_profile_info JSON API ──────────────────────
+      // Authoritative and stable (real biography, full_name and exact counts) —
+      // far more reliable than scraping the rendered header, which can pick up
+      // the "Notes" bubble or only the @handle. We're already on the
+      // instagram.com origin, so the fetch is same-origin and uses our cookies.
+      const api = await this.page.evaluate(async (handle) => {
+        try {
+          const r = await fetch(`/api/v1/users/web_profile_info/?username=${encodeURIComponent(handle)}`, {
+            headers: { "x-ig-app-id": "936619743392459" },
+            credentials: "include",
+          });
+          if (!r.ok) return null;
+          const j = await r.json();
+          const u = j && j.data && j.data.user;
+          if (!u) return null;
+          return {
+            fullName: u.full_name || null,
+            bio: u.biography || "",
+            isPrivate: !!u.is_private,
+            isVerified: !!u.is_verified,
+            followers: u.edge_followed_by ? u.edge_followed_by.count : null,
+            following: u.edge_follow ? u.edge_follow.count : null,
+            posts: u.edge_owner_to_timeline_media ? u.edge_owner_to_timeline_media.count : null,
+            avatarUrl: u.profile_pic_url_hd || u.profile_pic_url || null,
+            externalUrl: u.external_url || null,
+          };
+        } catch (_) { return null; }
+      }, normalizedUser).catch(() => null);
+
+      if (api && (api.followers != null || api.fullName)) {
+        return { username: normalizedUser, ...api, profileUrl: url, timestamp: new Date().toISOString() };
+      }
+
+      // ── Fallback: scrape the rendered DOM + meta tags ───────────────────────
       const data = await this.page.evaluate(() => {
         const out = {};
         const meta = (name) => {
@@ -119,13 +153,23 @@ module.exports = {
         if (pst && posts == null)     posts     = this._parseCount(pst[1]);
       }
 
-      // Bio: best-effort — strip name + counts line
+      // Full name: prefer the og:title ("Full Name (@handle) • Instagram ..."),
+      // then the DOM heading. The DOM heading is often just the @handle, so it's
+      // the last resort.
+      let fullName = null;
+      if (data._metaTitle) {
+        const t = data._metaTitle.split(/\s*\(@/)[0].trim();
+        if (t && !/instagram/i.test(t)) fullName = t;
+      }
+      if (!fullName) fullName = data._fullName;
+
+      // Bio: best-effort DOM scrape (strip the name + counts lines).
       let bio = (data._bioText || "").replace(data._fullName || "", "").trim();
       bio = bio.split("\n").filter(l => !/follow|takip|post|gönderi/i.test(l)).join("\n").trim();
 
       return {
         username: normalizedUser,
-        fullName: data._fullName,
+        fullName,
         bio,
         isPrivate: data._isPrivate,
         isVerified: data._isVerified,
