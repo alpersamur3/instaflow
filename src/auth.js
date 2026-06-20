@@ -189,6 +189,9 @@ module.exports = {
   },
 
   async close() {
+    if (this._msgTimer && this.stopMessageListener) {
+      await this.stopMessageListener().catch(() => {});
+    }
     if (this.browser) {
       await this.browser.close();
     } else if (this.context) {

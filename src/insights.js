@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("fs");
+const path = require("path");
 const { delay } = require("./utils");
 
 /**
@@ -549,6 +550,148 @@ module.exports = {
     if (!buf) throw new Error("Reel videosu indirilemedi (blob/CDN korumalı).");
     fs.writeFileSync(destPath, buf);
     return { path: destPath, url: srcUrl, bytes: buf.length };
+  },
+
+  /** Decode an Instagram shortcode (e.g. "DZy5HnRIlWY") into its numeric media id. */
+  _shortcodeToMediaId(shortcode) {
+    const A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let id = 0n;
+    for (const ch of shortcode) {
+      const v = A.indexOf(ch);
+      if (v < 0) return null;
+      id = id * 64n + BigInt(v);
+    }
+    return id.toString();
+  },
+
+  /**
+   * Full analysis of a reel for downstream/AI processing: downloads the video and
+   * returns the caption, engagement counts and a sample of real comments. Uses
+   * Instagram's media info/comments JSON APIs (reliable) rather than DOM scraping.
+   *
+   * Designed to be driven by an incoming DM — pass the message object emitted by
+   * `messageReceived` (with a shared reel) directly, or a reel URL / shortcode.
+   *
+   * @param {string|object} input - reel URL, shortcode, or a `messageReceived`
+   *   message object whose `media` is a shared reel.
+   * @param {object} [options]
+   * @param {boolean} [options.download=true]  - also download the .mp4
+   * @param {string}  [options.downloadDir="."] - directory for the downloaded file
+   * @param {string}  [options.downloadPath]    - explicit output path (overrides dir)
+   * @param {number}  [options.commentCount=12] - how many comments to sample
+   * @returns {Promise<object>} { url, shortcode, author, caption, likes, comments,
+   *   plays, durationSec, publishedAt, thumbnail, videoUrl, sampleComments, download }
+   */
+  async analyzeReel(input, options = {}) {
+    this._ensureReady();
+    const { download = true, downloadDir = ".", downloadPath, commentCount = 12 } = options;
+
+    // Accept a URL/shortcode string, or a messageReceived object carrying a reel.
+    let url;
+    if (typeof input === "string") {
+      url = input.startsWith("http") ? input : `https://www.instagram.com/reel/${input}/`;
+    } else if (input && input.media && input.media.url) {
+      url = input.media.url;
+    } else if (input && input.url) {
+      url = input.url;
+    } else {
+      throw new Error("analyzeReel: expected a reel URL/shortcode or a message containing a shared reel");
+    }
+
+    const m = url.match(/\/(reel|reels|p|tv)\/([A-Za-z0-9_-]+)/);
+    const shortcode = m ? m[2] : (typeof input === "string" && !input.includes("/") ? input : null);
+    if (!shortcode) throw new Error("analyzeReel: could not extract a shortcode from " + url);
+    const mediaId = this._shortcodeToMediaId(shortcode);
+
+    // The media APIs are same-origin — make sure we're on instagram.com.
+    if (!this.page.url().includes("instagram.com")) {
+      await this.page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+      await delay(1500);
+    }
+
+    const data = await this.page.evaluate(async ({ mid, n }) => {
+      const APP_ID = "936619743392459";
+      const out = { info: null, comments: [] };
+      try {
+        const r = await fetch(`/api/v1/media/${mid}/info/`, { headers: { "x-ig-app-id": APP_ID }, credentials: "include" });
+        if (r.ok) {
+          const j = await r.json();
+          const md = j.items && j.items[0];
+          if (md) out.info = {
+            author: md.user && md.user.username,
+            fullName: md.user && md.user.full_name,
+            likes: md.like_count,
+            comments: md.comment_count,
+            plays: md.play_count || md.ig_play_count || md.view_count || null,
+            caption: (md.caption && md.caption.text) || "",
+            takenAt: md.taken_at,
+            durationSec: md.video_duration || null,
+            thumbnail: md.image_versions2 && md.image_versions2.candidates && md.image_versions2.candidates[0] && md.image_versions2.candidates[0].url,
+            videoUrl: md.video_versions && md.video_versions[0] && md.video_versions[0].url,
+          };
+        }
+      } catch (_) {}
+      try {
+        const rc = await fetch(`/api/v1/media/${mid}/comments/?can_support_threading=true&permalink_enabled=false`, { headers: { "x-ig-app-id": APP_ID }, credentials: "include" });
+        if (rc.ok) {
+          const jc = await rc.json();
+          out.comments = (jc.comments || []).slice(0, n).map(c => ({
+            username: c.user && c.user.username,
+            text: c.text,
+            likes: c.comment_like_count || 0,
+            createdAt: c.created_at,
+          }));
+        }
+      } catch (_) {}
+      return out;
+    }, { mid: mediaId, n: commentCount });
+
+    if (!data.info) {
+      throw new Error(`analyzeReel: could not load media info for ${shortcode} (private, removed, or not a reel?)`);
+    }
+
+    // Download the .mp4 using the progressive URL from the info API (most
+    // reliable); fall back to the best-effort downloadReel if needed.
+    let downloadInfo = null;
+    if (download) {
+      const dest = downloadPath || path.join(downloadDir, `${shortcode}.mp4`);
+      try {
+        if (data.info.videoUrl) {
+          const arr = await this.page.evaluate(async (link) => {
+            try { const r = await fetch(link); const b = await r.arrayBuffer(); return Array.from(new Uint8Array(b)); }
+            catch { return null; }
+          }, data.info.videoUrl);
+          if (arr && arr.length > 10000) {
+            fs.writeFileSync(dest, Buffer.from(arr));
+            downloadInfo = { path: dest, bytes: arr.length, url: data.info.videoUrl };
+          }
+        }
+        if (!downloadInfo) downloadInfo = await this.downloadReel(url, dest);
+      } catch (e) {
+        downloadInfo = { error: e.message };
+      }
+    }
+
+    const result = {
+      url,
+      shortcode,
+      mediaId,
+      author: data.info.author,
+      fullName: data.info.fullName,
+      caption: data.info.caption,
+      likes: data.info.likes,
+      comments: data.info.comments,
+      plays: data.info.plays,
+      durationSec: data.info.durationSec,
+      publishedAt: data.info.takenAt ? new Date(data.info.takenAt * 1000).toISOString() : null,
+      thumbnail: data.info.thumbnail,
+      videoUrl: data.info.videoUrl,
+      sampleComments: data.comments,
+      download: downloadInfo,
+      timestamp: new Date().toISOString(),
+    };
+    this.emit("reelAnalyzed", result);
+    return result;
   },
 
   /** Return current session cookies (Playwright format) — e.g. to export for yt-dlp. */

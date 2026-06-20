@@ -24,7 +24,8 @@ API anahtarı yok. OAuth yok. Sadece gerçek bir tarayıcı oturumu, insan benze
 | **Etkileşim** | Beğen, beğeniyi geri al, yorum, kaydet, kaydı kaldır |
 | **Sosyal** | Takip et, takipten çık, DM gönder, hikaye görüntüle & tepki ver |
 | **Kazıma (Scraping)** | Profil istatistikleri, gönderi istatistikleri, yorumlar, takipçi/takip edilen, arama, hashtag gönderileri, gelen kutusu |
-| **Reels** | Reels akışını kazı, zenginleştirilmiş reel istatistikleri + kapak küçük resmi, en iyi çabayla reel video indirme |
+| **Reels** | Reels akışını kazı, zenginleştirilmiş reel istatistikleri + kapak küçük resmi, reel video indirme, tam reel analizi (açıklama/beğeni/yorum) |
+| **Gerçek Zamanlı** | DM mesaj dinleyici — gönderen/tür/paylaşılan-medya ile `messageReceived` olayı |
 | **Oturum** | Ham çerezleri dışa aktar (ör. `yt-dlp` için) |
 | **Güvenlik** | Yerleşik hız sınırlayıcı, insan benzeri gecikmeler, tespit önleyici gizlilik, kalıcı oturumlar |
 
@@ -199,6 +200,27 @@ const reel = await bot.getReelStats('https://www.instagram.com/reel/SHORTCODE/')
 #### `bot.downloadReel(postUrl, destPath)` → `{ path, url, bytes }`
 Bir reel'in video dosyasını `destPath`'e en iyi çabayla indirir. Instagram reel'leri MSE/blob + aralıklı CDN ile sunduğundan başarı garanti değildir — önce `og:video` ilerlemeli MP4'ünü, sonra `<video>` kaynağını, sonra yakalanan en büyük `.mp4` ağ yanıtını dener.
 
+#### `bot.analyzeReel(input, options?)` → `ReelAnalysis`
+İleri/yapay zeka işleme için tam reel analizi — videoyu indirir ve açıklamayı, etkileşim sayılarını ve **gerçek yorumlardan** bir örneklemi döndürür (Instagram'ın media info/comments JSON API'leriyle, sayılar kesindir). `input` bir reel URL'si, kısa kod **veya paylaşılan reel taşıyan bir `messageReceived` event nesnesi** olabilir.
+
+```js
+const a = await bot.analyzeReel('https://www.instagram.com/reel/SHORTCODE/', {
+  download: true,           // .mp4'ü de kaydet (varsayılan true)
+  downloadDir: './reels',   // nereye kaydedileceği
+  commentCount: 12,         // kaç yorum örnekleneceği
+});
+// {
+//   url, shortcode, mediaId, author, fullName, caption,
+//   likes, comments, plays, durationSec, publishedAt,
+//   thumbnail, videoUrl,
+//   sampleComments: [{ username, text, likes, createdAt }],
+//   download: { path, bytes, url },
+//   timestamp,
+// }
+```
+
+`reelAnalyzed` olayını yayar.
+
 ---
 
 ### Yazma — Yayınlama
@@ -283,6 +305,53 @@ Mevcut oturum çerezlerini Playwright formatında döndürür — kimlik doğrul
 
 ---
 
+## 📨 Gerçek Zamanlı DM Dinleyici
+
+DM gelen kutusunu yoklar ve gelen mesajlara anında tepki verir. Her
+`messageReceived` olayı **kimden** geldiğini, **ne** gönderildiğini ve mesaj
+**türünü** taşır — paylaşılan reel/gönderi için ise doğrudan `analyzeReel`'e
+verebileceğin hazır bir `media` nesnesi.
+
+#### `bot.startMessageListener(options?)`
+Yoklamayı başlatır. Seçenekler: `interval` (ms, varsayılan 6000), `limit` (yoklama başına thread, varsayılan 20), `includeSelf` (varsayılan false), `emitExisting` (başlangıçta mevcut birikimi yay, varsayılan false).
+
+#### `bot.stopMessageListener()`
+Yoklamayı durdurur ve arka plan sekmesini kapatır.
+
+```js
+// Sana DM ile gelen her reel'i otomatik analiz et
+bot.on('messageReceived', async (msg) => {
+  console.log(`@${msg.from} bir ${msg.type} gönderdi`); // type: 'text' | 'reel' | 'post' | …
+  if (msg.media?.type === 'reel') {
+    const reel = await bot.analyzeReel(msg, { download: true, downloadDir: './reels' });
+    console.log(`↳ @${reel.author} — ${reel.likes} beğeni, ${reel.comments} yorum`);
+    console.log(`↳ açıklama: ${reel.caption}`);
+  }
+});
+
+bot.on('ready', () => bot.startMessageListener({ interval: 5000 }));
+bot.init();
+```
+
+**`messageReceived` yükü:**
+
+```js
+{
+  threadId, threadTitle,
+  itemId,            // benzersiz mesaj id'si (yinelenenleri ayıklamak için)
+  from, fromId,      // gönderen kullanıcı adı + id
+  fromSelf,          // mesajı sen gönderdiysen true
+  type,              // 'text' | 'reel' | 'post' | ham IG item_type
+  text,              // metin içeriği (veya null)
+  media,             // { type:'reel'|'post', shortcode, url }  — veya null
+  timestamp,         // ms
+}
+```
+
+> Yoklama ayrı bir arka plan sekmesinde çalışır, diğer eylemlerini asla aksatmaz. Handler'ın ağır iş yapıyorsa (indirme, gezinme), sayfa işlemlerinin çakışmaması için sıraya al (ör. bir kuyruk).
+
+---
+
 ## ⚙️ Yapılandırma
 
 ```js
@@ -352,6 +421,8 @@ bot.on('storyFailed',      (info)   => console.warn('Hikaye başarısız:', info
 bot.on('profileSetup',     (result) => console.log('Profil güncellendi:', result));
 bot.on('postDeleted',      (result) => console.log('Gönderi silindi:', result));
 bot.on('dmSent',           (result) => console.log('DM gönderildi:', result));
+bot.on('messageReceived',  (msg)    => console.log('Yeni DM:', msg.from, msg.type));
+bot.on('reelAnalyzed',     (result) => console.log('Reel analiz edildi:', result.shortcode));
 ```
 
 ---

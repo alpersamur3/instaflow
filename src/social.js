@@ -308,5 +308,106 @@ module.exports = {
     } catch (err) {
       throw err;
     }
+  },
+
+  /**
+   * Start polling the DM inbox and emit a `messageReceived` event for every new
+   * incoming message. Each event payload is a normalized object:
+   *   { threadId, threadTitle, itemId, from, fromId, fromSelf, type, text, media, timestamp }
+   * where `type` is "text" | "reel" | "post" | (raw IG item_type), and `media`
+   * (for shared reels/posts) is { type, shortcode, url } — feed that straight
+   * into `analyzeReel(msg)`.
+   *
+   * Polling runs on a dedicated background tab so it doesn't disturb other
+   * actions on the main page.
+   *
+   * @param {object} [options]
+   * @param {number}  [options.interval=6000]     - poll period (ms)
+   * @param {number}  [options.limit=20]          - threads to scan per poll
+   * @param {boolean} [options.includeSelf=false] - also emit your own messages
+   * @param {boolean} [options.emitExisting=false]- emit the current backlog on start
+   */
+  async startMessageListener(options = {}) {
+    this._ensureReady();
+    if (this._msgTimer) return this; // already running
+
+    const interval = options.interval || 6000;
+    const limit = options.limit || 20;
+    const includeSelf = !!options.includeSelf;
+    const emitExisting = !!options.emitExisting;
+
+    this._msgSeen = new Set();
+    this._msgPage = await this.context.newPage();
+    await this._msgPage.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" }).catch(() => {});
+
+    let seeded = false;
+    const poll = async () => {
+      if (this._msgPolling || !this._msgPage) return;
+      this._msgPolling = true;
+      try {
+        const items = await this._msgPage.evaluate(async (lim) => {
+          const r = await fetch(`/api/v1/direct_v2/inbox/?persistentBadging=true&limit=${lim}`,
+            { headers: { "x-ig-app-id": "936619743392459" }, credentials: "include" });
+          if (!r.ok) return [];
+          const j = await r.json();
+          const viewerId = j.viewer && j.viewer.pk ? String(j.viewer.pk) : null;
+          const threads = (j.inbox && j.inbox.threads) || [];
+          const out = [];
+          for (const t of threads) {
+            const umap = {};
+            (t.users || []).forEach(u => { umap[String(u.pk)] = u.username; });
+            for (const it of (t.items || [])) {
+              const sid = String(it.user_id);
+              let type = it.item_type, text = it.text || null, media = null;
+              if (it.item_type === "clip" && it.clip && it.clip.clip) {
+                type = "reel";
+                media = { type: "reel", shortcode: it.clip.clip.code, url: `https://www.instagram.com/reel/${it.clip.clip.code}/` };
+              } else if (it.item_type === "reel_share" && it.reel_share && it.reel_share.media && it.reel_share.media.code) {
+                type = "reel"; text = it.reel_share.text || null;
+                media = { type: "reel", shortcode: it.reel_share.media.code, url: `https://www.instagram.com/reel/${it.reel_share.media.code}/` };
+              } else if (it.item_type === "media_share" && it.media_share && it.media_share.code) {
+                type = "post";
+                media = { type: "post", shortcode: it.media_share.code, url: `https://www.instagram.com/p/${it.media_share.code}/` };
+              }
+              out.push({
+                threadId: t.thread_id,
+                threadTitle: t.thread_title || null,
+                itemId: it.item_id,
+                from: umap[sid] || (sid === viewerId ? "(self)" : sid),
+                fromId: sid,
+                fromSelf: !!it.is_sent_by_viewer || sid === viewerId,
+                type, text, media,
+                timestamp: Math.round((it.timestamp || 0) / 1000),
+              });
+            }
+          }
+          return out;
+        }, limit);
+
+        items.sort((a, b) => a.timestamp - b.timestamp);
+        for (const msg of items) {
+          if (this._msgSeen.has(msg.itemId)) continue;
+          this._msgSeen.add(msg.itemId);
+          if (!seeded && !emitExisting) continue;          // seed silently on first poll
+          if (msg.fromSelf && !includeSelf) continue;
+          this.emit("messageReceived", msg);
+        }
+        seeded = true;
+      } catch (_) { /* transient (navigation / network) — retry next tick */ }
+      finally { this._msgPolling = false; }
+    };
+
+    await poll();                          // seed the "seen" set
+    this._msgTimer = setInterval(poll, interval);
+    this.emit("messageListenerStarted", { interval });
+    return this;
+  },
+
+  /** Stop the DM message listener and close its background tab. */
+  async stopMessageListener() {
+    if (this._msgTimer) { clearInterval(this._msgTimer); this._msgTimer = null; }
+    if (this._msgPage) { await this._msgPage.close().catch(() => {}); this._msgPage = null; }
+    this._msgPolling = false;
+    this.emit("messageListenerStopped");
   }
 };

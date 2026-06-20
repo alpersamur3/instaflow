@@ -24,7 +24,8 @@ No API key. No OAuth. Just a real browser session, human-like behaviour, and a c
 | **Engagement** | Like, unlike, comment, save, unsave |
 | **Social** | Follow, unfollow, send DM, view & react to story |
 | **Scraping** | Profile stats, post stats, comments, followers/following, search, hashtag posts, inbox |
-| **Reels** | Scrape the reels feed, enriched reel stats + cover thumbnail, best-effort reel video download |
+| **Reels** | Scrape the reels feed, enriched reel stats + cover thumbnail, reel video download, full reel analysis (caption/likes/comments) |
+| **Realtime** | DM message listener — `messageReceived` event with sender/type/shared-media |
 | **Session** | Export raw cookies (e.g. for `yt-dlp`) |
 | **Safety** | Built-in rate limiter, human-like delays, anti-detection stealth, persistent sessions |
 
@@ -199,6 +200,27 @@ const reel = await bot.getReelStats('https://www.instagram.com/reel/SHORTCODE/')
 #### `bot.downloadReel(postUrl, destPath)` → `{ path, url, bytes }`
 Best-effort download of a reel's video file to `destPath`. Instagram serves reels via MSE/blob + ranged CDN, so success isn't guaranteed — it tries the `og:video` progressive MP4, then the `<video>` source, then the largest captured `.mp4` network response.
 
+#### `bot.analyzeReel(input, options?)` → `ReelAnalysis`
+Full reel analysis for downstream / AI processing — downloads the video and returns the caption, engagement counts and a sample of **real comments** (via Instagram's media info/comments JSON APIs, so the numbers are exact). `input` can be a reel URL, a shortcode, **or a `messageReceived` event object** carrying a shared reel.
+
+```js
+const a = await bot.analyzeReel('https://www.instagram.com/reel/SHORTCODE/', {
+  download: true,           // also save the .mp4 (default true)
+  downloadDir: './reels',   // where to save it
+  commentCount: 12,         // how many comments to sample
+});
+// {
+//   url, shortcode, mediaId, author, fullName, caption,
+//   likes, comments, plays, durationSec, publishedAt,
+//   thumbnail, videoUrl,
+//   sampleComments: [{ username, text, likes, createdAt }],
+//   download: { path, bytes, url },
+//   timestamp,
+// }
+```
+
+Emits `reelAnalyzed`.
+
 ---
 
 ### Write — Publishing
@@ -283,6 +305,53 @@ Return the current session cookies in Playwright format — handy for exporting 
 
 ---
 
+## 📨 Real-time DM Listener
+
+Poll the DM inbox and react to incoming messages as they arrive. Each
+`messageReceived` event carries **who** it's from, **what** was sent and the
+message **type** — and for a shared reel/post, a ready-to-use `media` object you
+can hand straight to `analyzeReel`.
+
+#### `bot.startMessageListener(options?)`
+Start polling. Options: `interval` (ms, default 6000), `limit` (threads per poll, default 20), `includeSelf` (default false), `emitExisting` (emit the current backlog on start, default false).
+
+#### `bot.stopMessageListener()`
+Stop polling and close the background tab.
+
+```js
+// Auto-analyse every reel someone DMs you
+bot.on('messageReceived', async (msg) => {
+  console.log(`@${msg.from} sent a ${msg.type}`); // type: 'text' | 'reel' | 'post' | …
+  if (msg.media?.type === 'reel') {
+    const reel = await bot.analyzeReel(msg, { download: true, downloadDir: './reels' });
+    console.log(`↳ @${reel.author} — ${reel.likes} likes, ${reel.comments} comments`);
+    console.log(`↳ caption: ${reel.caption}`);
+  }
+});
+
+bot.on('ready', () => bot.startMessageListener({ interval: 5000 }));
+bot.init();
+```
+
+**`messageReceived` payload:**
+
+```js
+{
+  threadId, threadTitle,
+  itemId,            // unique message id (used for de-duplication)
+  from, fromId,      // sender username + id
+  fromSelf,          // true if you sent it
+  type,              // 'text' | 'reel' | 'post' | raw IG item_type
+  text,              // text content (or null)
+  media,             // { type:'reel'|'post', shortcode, url }  — or null
+  timestamp,         // ms
+}
+```
+
+> Polling runs on a dedicated background tab, so it never disrupts your other actions. If your handler does heavy work (downloads, navigation), serialize it (e.g. a queue) to avoid overlapping page operations.
+
+---
+
 ## ⚙️ Configuration
 
 ```js
@@ -352,6 +421,8 @@ bot.on('storyFailed',      (info)   => console.warn('Story failed:', info));
 bot.on('profileSetup',     (result) => console.log('Profile updated:', result));
 bot.on('postDeleted',      (result) => console.log('Post deleted:', result));
 bot.on('dmSent',           (result) => console.log('DM sent:', result));
+bot.on('messageReceived',  (msg)    => console.log('New DM:', msg.from, msg.type));
+bot.on('reelAnalyzed',     (result) => console.log('Reel analyzed:', result.shortcode));
 ```
 
 ---

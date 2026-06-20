@@ -12,8 +12,8 @@ const { DEFAULT_RATE_LIMITS } = require("./src/constants");
  *   - src/safety.js      humanize, rate limiting, block detection, guards
  *   - src/content.js     post / story / profile editing (publishing)
  *   - src/engagement.js  comment / like / save / bulk hashtag like
- *   - src/social.js      follow / unfollow / DM / story interactions
- *   - src/insights.js    profile / post / reel scraping, search, inbox, download
+ *   - src/social.js      follow / unfollow / DM / story interactions, DM listener
+ *   - src/insights.js    profile / post / reel scraping, search, inbox, download, reel analysis
  *
  * @example
  * const InstaFlow = require('instaflow');

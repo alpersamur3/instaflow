@@ -1,6 +1,6 @@
 {
   "name": "instaflow",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Headless Instagram automation powered by Playwright. Persistent sessions, human-like delays, built-in rate limiter. Post, story, like, comment, follow, DM, scrape reels and more — no API key required.",
   "main": "index.js",
   "files": [
