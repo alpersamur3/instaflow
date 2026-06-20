@@ -22,7 +22,7 @@ API anahtarı yok. OAuth yok. Sadece gerçek bir tarayıcı oturumu, insan benze
 |---|---|
 | **Yayınlama** | Fotoğraf/video gönderisi, hikaye yükleme, profil düzenleme (ad/bio/website/avatar), gönderi silme |
 | **Etkileşim** | Beğen, beğeniyi geri al, yorum, kaydet, kaydı kaldır |
-| **Sosyal** | Takip et, takipten çık, DM gönder, hikaye görüntüle & tepki ver |
+| **Sosyal** | Takip et, takipten çık, DM gönder, DM mesajlarına tepki ver, hikaye görüntüle & tepki ver |
 | **Kazıma (Scraping)** | Profil istatistikleri, gönderi istatistikleri, yorumlar, takipçi/takip edilen, arama, hashtag gönderileri, gelen kutusu |
 | **Reels** | Reels akışını kazı, zenginleştirilmiş reel istatistikleri + kapak küçük resmi, reel video indirme, tam reel analizi (açıklama/beğeni/yorum) |
 | **Gerçek Zamanlı** | DM mesaj dinleyici — gönderen/tür/paylaşılan-medya ile `messageReceived` olayı |
@@ -293,6 +293,15 @@ Bir kullanıcının aktif hikayesini açar ve izler (görüntüleme olarak sayı
 #### `bot.reactToStory(username, emoji)` → `Result`
 Bir kullanıcının aktif hikayesine emoji ile tepki verir.
 
+#### `bot.reactToMessage(threadId, target?, emoji?)` → `Result`
+Bir DM mesajına emoji ile tepki verir (hızlı set: ❤️ 😂 😮 😢 😡 👍; varsayılan ❤️). `target` mesajın **metni**, bir `{ text }` veya bir `messageReceived` mesaj nesnesi olabilir; vermezsen thread'deki son gelen metin mesajına tepki verir. Listener ile doğal uyum:
+
+```js
+bot.on('messageReceived', (msg) => {
+  if (msg.type === 'reel') bot.reactToMessage(msg.threadId, msg, '😂');
+});
+```
+
 ---
 
 ### Yardımcı
@@ -448,6 +457,7 @@ bot.on('postDeleted',      (result) => console.log('Gönderi silindi:', result))
 bot.on('dmSent',           (result) => console.log('DM gönderildi:', result));
 bot.on('messageReceived',  (msg)    => console.log('Yeni DM:', msg.from, msg.type, msg.sentAt));
 bot.on('userMessages',     (grp)    => console.log(`${grp.from}: ${grp.messages.length} yeni`));
+bot.on('messageReacted',   (result) => console.log('Tepki verildi:', result.emoji));
 bot.on('reelAnalyzed',     (result) => console.log('Reel analiz edildi:', result.shortcode));
 ```
 

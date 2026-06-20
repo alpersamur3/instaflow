@@ -341,6 +341,82 @@ module.exports = {
     }
   },
 
+  /**
+   * React to a specific DM message with an emoji (❤️ 😂 😮 😢 😡 👍 are the quick
+   * reactions; others are best-effort via the picker). Instagram Web sends DM
+   * reactions over its realtime channel, not a REST endpoint, so this drives the
+   * thread UI: hover the message → "React" → pick the emoji.
+   *
+   * @param {string} threadId - thread id (from getInbox/getMessages or a message's `threadId`)
+   * @param {string|object} [target] - the message TEXT to react to, a `{ text }`
+   *   object, or a `messageReceived` message (its `text` is used). Omit / pass
+   *   nothing to react to the last incoming text message in the thread.
+   * @param {string} [emoji="❤️"]
+   * @returns {Promise<{success:boolean,threadId:string,emoji:string,message:string,timestamp:string}>}
+   */
+  async reactToMessage(threadId, target, emoji = "❤️") {
+    this._ensureReady();
+    if (typeof emoji !== "string" || !emoji) emoji = "❤️";
+
+    // Resolve the text of the message to react to.
+    let text = null;
+    if (typeof target === "string") text = target;
+    else if (target && typeof target === "object" && target.text) text = target.text;
+    if (!text) {
+      const m = await this.getMessages(threadId, 5);
+      const rev = [...m.messages].reverse();
+      const pick = rev.find(x => !x.fromSelf && x.text) || rev.find(x => x.text);
+      if (!pick) throw new Error("reactToMessage: no text message to react to — pass the message text explicitly (media-only messages aren't supported).");
+      text = pick.text;
+    }
+
+    try {
+      await this.page.goto(`https://www.instagram.com/direct/t/${threadId}/`, { waitUntil: "domcontentloaded" });
+      await delay(4000);
+      await this._dismissDialogs();
+
+      // Hover the message bubble to reveal its action controls.
+      const bubble = this.page.getByText(text, { exact: false }).last();
+      if (!(await bubble.count() > 0)) {
+        throw new Error(`reactToMessage: message containing "${text.slice(0, 30)}" not found in thread ${threadId}`);
+      }
+      await bubble.scrollIntoViewIfNeeded().catch(() => {});
+      await bubble.hover();
+      await delay(900);
+
+      // Click "React to message …".
+      const reactBtn = this.page.locator(
+        '[aria-label^="React to message"], [aria-label*="React to message" i], ' +
+        '[aria-label*="tepki ver" i], div[role="button"][aria-label*="react" i]'
+      ).first();
+      await reactBtn.waitFor({ state: "visible", timeout: 8000 });
+      await reactBtn.click({ force: true });
+      await delay(900);
+
+      // Pick the emoji from the quick bar; fall back to the full picker.
+      let reacted = false;
+      const quick = this.page.locator(`[role="button"]:has-text("${emoji}"), button:has-text("${emoji}")`).first();
+      if (await quick.count() > 0 && await quick.isVisible().catch(() => false)) {
+        await quick.click({ force: true });
+        reacted = true;
+      } else {
+        const more = this.page.locator('[aria-label*="more" i][role="button"], [aria-label="Choose an emoji"], div[role="button"]:has-text("+")').first();
+        if (await more.count() > 0) { await more.click({ force: true }).catch(() => {}); await delay(800); }
+        const any = this.page.locator(`[role="button"]:has-text("${emoji}"), button:has-text("${emoji}")`).first();
+        if (await any.count() > 0 && await any.isVisible().catch(() => false)) { await any.click({ force: true }); reacted = true; }
+      }
+      if (!reacted) throw new Error(`reactToMessage: could not select emoji ${emoji} (not in the quick bar).`);
+      await delay(1500);
+
+      const result = { success: true, threadId, emoji, message: text.slice(0, 60), timestamp: new Date().toISOString() };
+      this.emit("messageReacted", result);
+      return result;
+    } catch (err) {
+      this.emit("messageReactFailed", { threadId, error: err.message });
+      throw err;
+    }
+  },
+
   /** Build the public `sender` object from a trimmed inbox user record. @private */
   _buildSender(u, lastSeenMicro) {
     if (!u) return null;

@@ -22,7 +22,7 @@ No API key. No OAuth. Just a real browser session, human-like behaviour, and a c
 |---|---|
 | **Publishing** | Post photo/video, upload story, edit profile (name/bio/website/avatar), delete post |
 | **Engagement** | Like, unlike, comment, save, unsave |
-| **Social** | Follow, unfollow, send DM, view & react to story |
+| **Social** | Follow, unfollow, send DM, react to DM messages, view & react to story |
 | **Scraping** | Profile stats, post stats, comments, followers/following, search, hashtag posts, inbox |
 | **Reels** | Scrape the reels feed, enriched reel stats + cover thumbnail, reel video download, full reel analysis (caption/likes/comments) |
 | **Realtime** | DM message listener — `messageReceived` event with sender/type/shared-media |
@@ -293,6 +293,15 @@ Open and watch a user's currently-active story (registers as a view).
 #### `bot.reactToStory(username, emoji)` → `Result`
 React to a user's active story with an emoji.
 
+#### `bot.reactToMessage(threadId, target?, emoji?)` → `Result`
+React to a DM message with an emoji (quick set: ❤️ 😂 😮 😢 😡 👍; default ❤️). `target` is the message **text**, a `{ text }`, or a `messageReceived` message object; omit it to react to the last incoming text message. Pairs naturally with the listener:
+
+```js
+bot.on('messageReceived', (msg) => {
+  if (msg.type === 'reel') bot.reactToMessage(msg.threadId, msg, '😂');
+});
+```
+
 ---
 
 ### Utility
@@ -449,6 +458,7 @@ bot.on('postDeleted',      (result) => console.log('Post deleted:', result));
 bot.on('dmSent',           (result) => console.log('DM sent:', result));
 bot.on('messageReceived',  (msg)    => console.log('New DM:', msg.from, msg.type, msg.sentAt));
 bot.on('userMessages',     (grp)    => console.log(`${grp.from}: ${grp.messages.length} new`));
+bot.on('messageReacted',   (result) => console.log('Reacted:', result.emoji));
 bot.on('reelAnalyzed',     (result) => console.log('Reel analyzed:', result.shortcode));
 ```
 
