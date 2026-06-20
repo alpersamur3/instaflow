@@ -939,36 +939,38 @@ module.exports = {
   },
 
   /**
-   * Read the DM inbox — recent threads with last-message preview.
+   * Read the DM inbox — recent threads, each with its last message (text/type,
+   * shared media, `sentAt` date-time and sender).
    * @param {number} count
+   * @returns {Promise<{collected:number, threads:Array}>}
    */
   async getInbox(count = 20) {
     this._ensureReady();
     try {
-      await this.page.goto("https://www.instagram.com/direct/inbox/", { waitUntil: "domcontentloaded" });
-      await delay(4000);
-      await this._dismissDialogs();
-
-      const threads = await this.page.evaluate(() => {
-        const out = [];
-        const items = Array.from(document.querySelectorAll('a[href^="/direct/t/"], div[role="listitem"] a[href*="/direct/t/"]'));
-        const seen = new Set();
-        for (const a of items) {
-          const href = a.getAttribute("href");
-          if (!href || seen.has(href)) continue;
-          seen.add(href);
-          const id = href.split("/").filter(Boolean).pop();
-          const text = (a.innerText || "").split("\n").map(s => s.trim()).filter(Boolean);
-          out.push({
-            threadId: id,
-            url: `https://www.instagram.com${href}`,
-            title: text[0] || null,
-            preview: text.slice(1).join(" | ") || null
-          });
+      if (!this.page.url().includes("instagram.com")) {
+        await this.page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+        await delay(1000);
+      }
+      const summaries = await this._fetchInboxSummary(this.page, count);
+      const threads = summaries.map(s => {
+        const umap = {};
+        (s.users || []).forEach(u => { umap[u.pk] = u; });
+        let lastMessage = null;
+        if (s.latestItem) {
+          const m = this._normalizeItem(s.latestItem, umap);
+          lastMessage = {
+            from: m.from, fromSelf: m.fromSelf, type: m.type, text: m.text,
+            media: m.media, repliedTo: m.repliedTo, timestamp: m.timestamp, sentAt: m.sentAt,
+          };
         }
-        return out;
+        return {
+          threadId: s.threadId,
+          title: s.threadTitle,
+          users: (s.users || []).map(u => u.username),
+          url: `https://www.instagram.com/direct/t/${s.threadId}/`,
+          lastMessage,
+        };
       });
-
       return { collected: threads.length, threads: threads.slice(0, count) };
     } catch (err) {
       throw err;
@@ -976,28 +978,36 @@ module.exports = {
   },
 
   /**
-   * Read recent messages in a specific DM thread.
+   * Read recent messages in a specific DM thread via the thread API. Each message
+   * is fully normalized: { itemId, from, fromId, fromSelf, type, text, media,
+   * repliedTo, timestamp, sentAt, sender }.
    * @param {string} threadId - The id from getInbox()
    * @param {number} count
    */
   async getMessages(threadId, count = 30) {
     this._ensureReady();
     try {
-      await this.page.goto(`https://www.instagram.com/direct/t/${threadId}/`, { waitUntil: "domcontentloaded" });
-      await delay(4000);
+      if (!this.page.url().includes("instagram.com")) {
+        await this.page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+        await delay(1000);
+      }
+      const raw = await this._fetchThreadRaw(this.page, threadId, count);
+      if (!raw) throw new Error(`Could not load DM thread ${threadId}`);
 
-      const messages = await this.page.evaluate(() => {
-        const items = Array.from(document.querySelectorAll('div[role="row"], div[data-pagelet*="MWThread"] div[role="listitem"]'));
-        const out = [];
-        for (const it of items) {
-          const text = (it.innerText || "").trim();
-          if (!text) continue;
-          out.push({ text });
-        }
-        return out;
-      });
+      const umap = {};
+      raw.users.forEach(u => { umap[u.pk] = u; });
 
-      return { threadId, collected: messages.length, messages: messages.slice(-count) };
+      const messages = raw.rawItems
+        .map(ri => {
+          const m = this._normalizeItem(ri, umap);
+          const ls = raw.lastSeenAt[ri.userId];
+          m.sender = umap[ri.userId] ? this._buildSender(umap[ri.userId], ls && ls.timestamp) : null;
+          return m;
+        })
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .slice(-count);
+
+      return { threadId, collected: messages.length, messages };
     } catch (err) {
       throw err;
     }

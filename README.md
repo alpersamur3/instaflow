@@ -177,10 +177,10 @@ Scrape the top posts under a hashtag.
 ### Read — Inbox
 
 #### `bot.getInbox(count?)` → `{ threads }`
-List DM threads with last-message preview.
+List DM threads, each with its `lastMessage` (type, text/media, `sentAt`, sender).
 
 #### `bot.getMessages(threadId, count?)` → `{ messages }`
-Read messages in a specific thread.
+Read messages in a thread (via the thread API). Each message is fully normalized — `{ itemId, from, fromId, fromSelf, type, text, media, repliedTo, timestamp, sentAt, sender }` — so you get the **date-time** (`sentAt`) and the quoted message (`repliedTo`) too.
 
 ---
 
@@ -307,26 +307,42 @@ Return the current session cookies in Playwright format — handy for exporting 
 
 ## 📨 Real-time DM Listener
 
-Poll the DM inbox and react to incoming messages as they arrive. Each
-`messageReceived` event carries **who** it's from, **what** was sent and the
-message **type** — and for a shared reel/post, a ready-to-use `media` object you
-can hand straight to `analyzeReel`.
+Poll the DM inbox and react to incoming messages as they arrive. **Burst-safe:**
+the inbox only previews ~2 items per thread, so when a thread shows new activity
+the full thread is fetched and **every** new message is delivered — none are
+dropped even if several arrive between polls.
+
+Two events fire per poll — use whichever you like:
+
+| Event | Fires | Payload |
+|---|---|---|
+| `messageReceived` | once **per new message** | a single normalized message |
+| `userMessages` | once **per thread/person** with new messages | `{ threadId, threadTitle, from, fromId, sender, messages: [ … ] }` |
+
+So if Alper sends 3 messages and Mehmet sends 2 in one cycle, you get 5
+`messageReceived` events **and** 2 `userMessages` events (Alper's 3 batched, then
+Mehmet's 2).
 
 #### `bot.startMessageListener(options?)`
-Start polling. Options: `interval` (ms, default 6000), `limit` (threads per poll, default 20), `includeSelf` (default false), `emitExisting` (emit the current backlog on start, default false), `enrichSender` (add bio/follower counts/story status to `sender`, one extra request per new sender, default false).
+Start polling. Options: `interval` (ms, default 6000), `limit` (threads per poll, default 20), `threadLimit` (messages fetched per active thread, default 25), `includeSelf` (default false), `emitExisting` (emit the current backlog on start, default false), `enrichSender` (add bio/follower counts/story status to `sender`, one extra request per new sender, default false).
 
 #### `bot.stopMessageListener()`
 Stop polling and close the background tab.
 
 ```js
-// Auto-analyse every reel someone DMs you
+// Per-message: auto-analyse every reel someone DMs you
 bot.on('messageReceived', async (msg) => {
-  console.log(`@${msg.from} sent a ${msg.type}`); // type: 'text' | 'reel' | 'post' | …
+  console.log(`@${msg.from} sent a ${msg.type} at ${msg.sentAt}`);
+  if (msg.repliedTo) console.log(`  ↳ replying to ${msg.repliedTo.from}: "${msg.repliedTo.text}"`);
   if (msg.media?.type === 'reel') {
     const reel = await bot.analyzeReel(msg, { download: true, downloadDir: './reels' });
-    console.log(`↳ @${reel.author} — ${reel.likes} likes, ${reel.comments} comments`);
-    console.log(`↳ caption: ${reel.caption}`);
+    console.log(`  ↳ @${reel.author} — ${reel.likes} likes, ${reel.comments} comments`);
   }
+});
+
+// Per-person: handle each sender's new messages as one batch
+bot.on('userMessages', ({ from, messages }) => {
+  console.log(`@${from} sent ${messages.length} new message(s)`);
 });
 
 bot.on('ready', () => bot.startMessageListener({ interval: 5000 }));
@@ -344,7 +360,9 @@ bot.init();
   type,              // 'text' | 'reel' | 'post' | raw IG item_type
   text,              // text content (or null)
   media,             // { type:'reel'|'post', shortcode, url }  — or null
+  repliedTo,         // the quoted message (same shape) if this is a reply — else null
   timestamp,         // ms
+  sentAt,            // ISO date-time string
   sender: {          // who sent it (free, straight from the inbox)
     username, fullName, avatar /* profile pic */, isVerified, isPrivate,
     accountType, hasHighlights,
@@ -429,7 +447,8 @@ bot.on('storyFailed',      (info)   => console.warn('Story failed:', info));
 bot.on('profileSetup',     (result) => console.log('Profile updated:', result));
 bot.on('postDeleted',      (result) => console.log('Post deleted:', result));
 bot.on('dmSent',           (result) => console.log('DM sent:', result));
-bot.on('messageReceived',  (msg)    => console.log('New DM:', msg.from, msg.type));
+bot.on('messageReceived',  (msg)    => console.log('New DM:', msg.from, msg.type, msg.sentAt));
+bot.on('userMessages',     (grp)    => console.log(`${grp.from}: ${grp.messages.length} new`));
 bot.on('reelAnalyzed',     (result) => console.log('Reel analyzed:', result.shortcode));
 ```
 

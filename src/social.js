@@ -2,6 +2,37 @@
 
 const { delay } = require("./utils");
 
+// ── Shared browser-side trimmers ────────────────────────────────────────────
+// Injected into page.evaluate() (and eval'd there) so the message listener,
+// getMessages and getInbox all normalize Instagram direct items the same way.
+// RAW_TRIM is a named function expression so it can recurse into quoted
+// (replied_to_message) items.
+const RAW_TRIM = `function __trim(it){
+  if(!it) return null;
+  return {
+    itemType: it.item_type,
+    itemId: it.item_id,
+    userId: String(it.user_id),
+    ts: it.timestamp,
+    text: it.text || null,
+    sentByViewer: !!it.is_sent_by_viewer,
+    clipCode: (it.clip && it.clip.clip && it.clip.clip.code) || null,
+    reelShareCode: (it.reel_share && it.reel_share.media && it.reel_share.media.code) || null,
+    reelShareText: (it.reel_share && it.reel_share.text) || null,
+    mediaShareCode: (it.media_share && it.media_share.code) || null,
+    replied: it.replied_to_message ? __trim(it.replied_to_message) : null
+  };
+}`;
+
+const USER_TRIM = `function __utrim(u){
+  return {
+    pk: String(u.pk), username: u.username, full_name: u.full_name || null,
+    profile_pic_url: u.profile_pic_url || null, is_verified: !!u.is_verified,
+    is_private: !!u.is_private, account_type: u.account_type || null,
+    has_highlight_reels: !!u.has_highlight_reels, friendship_status: u.friendship_status || null
+  };
+}`;
+
 /**
  * Social graph: follow / unfollow, direct messages and story interactions.
  * Mixed into InstagramBot.prototype.
@@ -310,27 +341,118 @@ module.exports = {
     }
   },
 
+  /** Build the public `sender` object from a trimmed inbox user record. @private */
+  _buildSender(u, lastSeenMicro) {
+    if (!u) return null;
+    const fs = u.friendship_status;
+    return {
+      username: u.username,
+      fullName: u.full_name || null,
+      avatar: u.profile_pic_url || null,
+      isVerified: !!u.is_verified,
+      isPrivate: !!u.is_private,
+      accountType: u.account_type || null,
+      hasHighlights: !!u.has_highlight_reels,
+      friendship: fs ? {
+        following: !!fs.following, followedBy: !!fs.followed_by,
+        isBestie: !!fs.is_bestie, muting: !!fs.muting,
+        blocking: !!fs.blocking, restricted: !!fs.is_restricted,
+      } : null,
+      lastActiveAt: lastSeenMicro ? Math.round(Number(lastSeenMicro) / 1000) : null,
+    };
+  },
+
   /**
-   * Start polling the DM inbox and emit a `messageReceived` event for every new
-   * incoming message. Each payload is a normalized object:
-   *   { threadId, threadTitle, itemId, from, fromId, fromSelf, type, text, media,
-   *     timestamp, sender }
-   * where `type` is "text" | "reel" | "post" | (raw IG item_type), `media`
-   * (shared reels/posts) is { type, shortcode, url } — feed straight into
-   * `analyzeReel(msg)` — and `sender` describes who sent it:
-   *   sender = { username, fullName, avatar, isVerified, isPrivate, accountType,
-   *              hasHighlights, friendship:{following,followedBy,isBestie,muting,
-   *              blocking,restricted}, lastActiveAt }
-   * These come free from the inbox payload. With `enrichSender: true`, each new
-   * sender is additionally augmented (one extra request each) with:
-   *   sender += { bio, followers, following, posts, externalUrl,
-   *               hasActiveStory, storyCount }
+   * Normalize a trimmed raw direct item into a public message object. Recurses
+   * into a quoted/replied item to fill `repliedTo`. @private
+   */
+  _normalizeItem(raw, umap) {
+    if (!raw) return null;
+    let type = raw.itemType, text = raw.text, media = null;
+    if (raw.clipCode) {
+      type = "reel"; media = { type: "reel", shortcode: raw.clipCode, url: `https://www.instagram.com/reel/${raw.clipCode}/` };
+    } else if (raw.reelShareCode) {
+      type = "reel"; text = raw.reelShareText || text;
+      media = { type: "reel", shortcode: raw.reelShareCode, url: `https://www.instagram.com/reel/${raw.reelShareCode}/` };
+    } else if (raw.mediaShareCode) {
+      type = "post"; media = { type: "post", shortcode: raw.mediaShareCode, url: `https://www.instagram.com/p/${raw.mediaShareCode}/` };
+    }
+    const u = umap[raw.userId];
+    const tsMs = Math.round((raw.ts || 0) / 1000);
+    return {
+      itemId: raw.itemId,
+      from: (u && u.username) || (raw.sentByViewer ? "(self)" : raw.userId),
+      fromId: raw.userId,
+      fromSelf: !!raw.sentByViewer,
+      type, text, media,
+      repliedTo: raw.replied ? this._normalizeItem(raw.replied, umap) : null,
+      timestamp: tsMs,
+      sentAt: tsMs ? new Date(tsMs).toISOString() : null,
+    };
+  },
+
+  /** Fetch inbox thread summaries (for activity detection + getInbox previews). @private */
+  async _fetchInboxSummary(page, limit) {
+    return page.evaluate(async ({ lim, trimSrc, utrimSrc }) => {
+      const __trim = eval("(" + trimSrc + ")");
+      const __utrim = eval("(" + utrimSrc + ")");
+      const r = await fetch(`/api/v1/direct_v2/inbox/?persistentBadging=true&limit=${lim}`,
+        { headers: { "x-ig-app-id": "936619743392459" }, credentials: "include" });
+      if (!r.ok) return [];
+      const j = await r.json();
+      return ((j.inbox && j.inbox.threads) || []).map(t => ({
+        threadId: t.thread_id,
+        threadTitle: t.thread_title || null,
+        users: (t.users || []).map(__utrim),
+        lastSeenAt: t.last_seen_at || {},
+        latestItemId: (t.items && t.items[0] && t.items[0].item_id) || null,
+        latestItem: (t.items && t.items[0]) ? __trim(t.items[0]) : null,
+      }));
+    }, { lim: limit, trimSrc: RAW_TRIM, utrimSrc: USER_TRIM });
+  },
+
+  /** Fetch a thread's full message history (trimmed raw items + users). @private */
+  async _fetchThreadRaw(page, threadId, limit) {
+    return page.evaluate(async ({ tid, lim, trimSrc, utrimSrc }) => {
+      const __trim = eval("(" + trimSrc + ")");
+      const __utrim = eval("(" + utrimSrc + ")");
+      const r = await fetch(`/api/v1/direct_v2/threads/${encodeURIComponent(tid)}/?limit=${lim}`,
+        { headers: { "x-ig-app-id": "936619743392459" }, credentials: "include" });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const th = j.thread;
+      if (!th) return null;
+      return {
+        users: (th.users || []).map(__utrim),
+        lastSeenAt: th.last_seen_at || {},
+        rawItems: (th.items || []).map(__trim),
+      };
+    }, { tid: threadId, lim: limit, trimSrc: RAW_TRIM, utrimSrc: USER_TRIM });
+  },
+
+  /**
+   * Start polling the DM inbox and emit events for new messages. Burst-safe: the
+   * inbox only previews ~2 items/thread, so when a thread shows new activity the
+   * full thread is fetched and **every** new message is processed (none dropped).
    *
-   * Polling runs on a dedicated background tab so it doesn't disturb the main page.
+   * Two events fire per poll:
+   *   - `messageReceived` — once per new message (in order)
+   *   - `userMessages`     — once per thread/person, with all of that thread's new
+   *                          messages batched: { threadId, threadTitle, from,
+   *                          fromId, sender, messages:[…] }
+   *
+   * Each message is normalized:
+   *   { threadId, threadTitle, itemId, from, fromId, fromSelf, type, text, media,
+   *     repliedTo, timestamp, sentAt, sender }
+   * `media` (shared reels/posts) → { type, shortcode, url } (pass to analyzeReel);
+   * `repliedTo` is the quoted message (same shape) or null; `sentAt` is an ISO
+   * date-time; `sender` is the cheap profile (+bio/followers/story with
+   * `enrichSender`).
    *
    * @param {object} [options]
    * @param {number}  [options.interval=6000]      - poll period (ms)
    * @param {number}  [options.limit=20]           - threads to scan per poll
+   * @param {number}  [options.threadLimit=25]     - messages fetched per active thread
    * @param {boolean} [options.includeSelf=false]  - also emit your own messages
    * @param {boolean} [options.emitExisting=false] - emit the current backlog on start
    * @param {boolean} [options.enrichSender=false] - add bio/followers/story to sender
@@ -341,11 +463,14 @@ module.exports = {
 
     const interval = options.interval || 6000;
     const limit = options.limit || 20;
+    const threadLimit = options.threadLimit || 25;
     const includeSelf = !!options.includeSelf;
     const emitExisting = !!options.emitExisting;
     const enrichSender = !!options.enrichSender;
 
     this._msgSeen = new Set();
+    this._threadLatest = {};
+    this._msgSinceTs = emitExisting ? 0 : Date.now();
     this._msgPage = await this.context.newPage();
     await this._msgPage.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" }).catch(() => {});
 
@@ -354,82 +479,75 @@ module.exports = {
       if (this._msgPolling || !this._msgPage) return;
       this._msgPolling = true;
       try {
-        const items = await this._msgPage.evaluate(async (lim) => {
-          const r = await fetch(`/api/v1/direct_v2/inbox/?persistentBadging=true&limit=${lim}`,
-            { headers: { "x-ig-app-id": "936619743392459" }, credentials: "include" });
-          if (!r.ok) return [];
-          const j = await r.json();
-          const viewerId = j.viewer && j.viewer.pk ? String(j.viewer.pk) : null;
-          const threads = (j.inbox && j.inbox.threads) || [];
-          const out = [];
-          for (const t of threads) {
-            const umap = {};
-            (t.users || []).forEach(u => { umap[String(u.pk)] = u; });
-            for (const it of (t.items || [])) {
-              const sid = String(it.user_id);
-              let type = it.item_type, text = it.text || null, media = null;
-              if (it.item_type === "clip" && it.clip && it.clip.clip) {
-                type = "reel";
-                media = { type: "reel", shortcode: it.clip.clip.code, url: `https://www.instagram.com/reel/${it.clip.clip.code}/` };
-              } else if (it.item_type === "reel_share" && it.reel_share && it.reel_share.media && it.reel_share.media.code) {
-                type = "reel"; text = it.reel_share.text || null;
-                media = { type: "reel", shortcode: it.reel_share.media.code, url: `https://www.instagram.com/reel/${it.reel_share.media.code}/` };
-              } else if (it.item_type === "media_share" && it.media_share && it.media_share.code) {
-                type = "post";
-                media = { type: "post", shortcode: it.media_share.code, url: `https://www.instagram.com/p/${it.media_share.code}/` };
-              }
-              // Sender profile (free, from the inbox users[] + last_seen_at).
-              const su = umap[sid];
-              const ls = t.last_seen_at && t.last_seen_at[sid];
-              const fs = su && su.friendship_status;
-              const sender = su ? {
-                username: su.username,
-                fullName: su.full_name || null,
-                avatar: su.profile_pic_url || null,
-                isVerified: !!su.is_verified,
-                isPrivate: !!su.is_private,
-                accountType: su.account_type || null,
-                hasHighlights: !!su.has_highlight_reels,
-                friendship: fs ? {
-                  following: !!fs.following, followedBy: !!fs.followed_by,
-                  isBestie: !!fs.is_bestie, muting: !!fs.muting,
-                  blocking: !!fs.blocking, restricted: !!fs.is_restricted,
-                } : null,
-                lastActiveAt: ls && ls.timestamp ? Math.round(Number(ls.timestamp) / 1000) : null,
-              } : null;
-              out.push({
-                threadId: t.thread_id,
-                threadTitle: t.thread_title || null,
-                itemId: it.item_id,
-                from: (su && su.username) || (sid === viewerId ? "(self)" : sid),
-                fromId: sid,
-                fromSelf: !!it.is_sent_by_viewer || sid === viewerId,
-                type, text, media,
-                timestamp: Math.round((it.timestamp || 0) / 1000),
-                sender,
-              });
-            }
-          }
-          return out;
-        }, limit);
+        const summaries = await this._fetchInboxSummary(this._msgPage, limit);
 
-        items.sort((a, b) => a.timestamp - b.timestamp);
-        for (const msg of items) {
-          if (this._msgSeen.has(msg.itemId)) continue;
-          this._msgSeen.add(msg.itemId);
-          if (!seeded && !emitExisting) continue;          // seed silently on first poll
-          if (msg.fromSelf && !includeSelf) continue;
-          if (enrichSender && msg.sender && !msg.fromSelf) {
-            await this._enrichSender(msg.sender, msg.fromId).catch(() => {});
-          }
-          this.emit("messageReceived", msg);
+        // First poll with default options: remember each thread's latest item so
+        // only genuinely new activity triggers a (deep) fetch — no startup storm.
+        if (!seeded && !emitExisting) {
+          for (const s of summaries) if (s.latestItemId) this._threadLatest[s.threadId] = s.latestItemId;
+          this._msgSinceTs = Date.now();
+          seeded = true;
+          return;
         }
         seeded = true;
+
+        for (const s of summaries) {
+          if (!s.latestItemId) continue;
+          if (this._threadLatest[s.threadId] === s.latestItemId) continue; // no change
+          this._threadLatest[s.threadId] = s.latestItemId;
+
+          // New activity → fetch the full thread so no burst message is missed.
+          const raw = await this._fetchThreadRaw(this._msgPage, s.threadId, threadLimit);
+          if (!raw) continue;
+          const umap = {};
+          raw.users.forEach(u => { umap[u.pk] = u; });
+
+          const newMsgs = [];
+          for (const ri of raw.rawItems) {
+            if (this._msgSeen.has(ri.itemId)) continue;
+            this._msgSeen.add(ri.itemId);
+            const tsMs = Math.round((ri.ts || 0) / 1000);
+            if (!emitExisting && tsMs <= this._msgSinceTs) continue; // pre-start history
+            const msg = this._normalizeItem(ri, umap);
+            msg.threadId = s.threadId;
+            msg.threadTitle = s.threadTitle;
+            const ls = raw.lastSeenAt[ri.userId];
+            msg.sender = umap[ri.userId] ? this._buildSender(umap[ri.userId], ls && ls.timestamp) : null;
+            if (msg.fromSelf && !includeSelf) continue;
+            newMsgs.push(msg);
+          }
+          if (!newMsgs.length) continue;
+          newMsgs.sort((a, b) => a.timestamp - b.timestamp);
+
+          if (enrichSender) {
+            const seen = {};
+            for (const m of newMsgs) {
+              if (!m.sender || seen[m.fromId]) continue;
+              await this._enrichSender(m.sender, m.fromId).catch(() => {});
+              seen[m.fromId] = m.sender;
+            }
+            // share the enriched object with same-sender messages in this batch
+            for (const m of newMsgs) if (m.sender && seen[m.fromId]) Object.assign(m.sender, seen[m.fromId]);
+          }
+
+          for (const m of newMsgs) this.emit("messageReceived", m);
+
+          const primary = (raw.users || []).find(u => String(u.pk) === String(newMsgs[0].fromId)) || raw.users[0];
+          const pls = primary && raw.lastSeenAt[primary.pk];
+          this.emit("userMessages", {
+            threadId: s.threadId,
+            threadTitle: s.threadTitle,
+            from: primary ? primary.username : s.threadTitle,
+            fromId: primary ? primary.pk : (newMsgs[0] && newMsgs[0].fromId),
+            sender: primary ? this._buildSender(primary, pls && pls.timestamp) : (newMsgs[0] && newMsgs[0].sender),
+            messages: newMsgs,
+          });
+        }
       } catch (_) { /* transient (navigation / network) — retry next tick */ }
       finally { this._msgPolling = false; }
     };
 
-    await poll();                          // seed the "seen" set
+    await poll();                          // seed (or emit backlog with emitExisting)
     this._msgTimer = setInterval(poll, interval);
     this.emit("messageListenerStarted", { interval });
     return this;

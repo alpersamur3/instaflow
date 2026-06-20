@@ -177,10 +177,10 @@ Bir hashtag altındaki en iyi gönderileri kazır.
 ### Okuma — Gelen Kutusu
 
 #### `bot.getInbox(count?)` → `{ threads }`
-Son mesaj önizlemesiyle DM konularını (thread) listeler.
+DM konularını listeler; her biri `lastMessage` ile (tür, metin/medya, `sentAt`, gönderen).
 
 #### `bot.getMessages(threadId, count?)` → `{ messages }`
-Belirli bir konudaki mesajları okur.
+Bir konudaki mesajları (thread API'siyle) okur. Her mesaj tam normalize — `{ itemId, from, fromId, fromSelf, type, text, media, repliedTo, timestamp, sentAt, sender }` — yani **tarih-saat** (`sentAt`) ve alıntılanan mesaj (`repliedTo`) de gelir.
 
 ---
 
@@ -307,26 +307,41 @@ Mevcut oturum çerezlerini Playwright formatında döndürür — kimlik doğrul
 
 ## 📨 Gerçek Zamanlı DM Dinleyici
 
-DM gelen kutusunu yoklar ve gelen mesajlara anında tepki verir. Her
-`messageReceived` olayı **kimden** geldiğini, **ne** gönderildiğini ve mesaj
-**türünü** taşır — paylaşılan reel/gönderi için ise doğrudan `analyzeReel`'e
-verebileceğin hazır bir `media` nesnesi.
+DM gelen kutusunu yoklar ve gelen mesajlara anında tepki verir. **Burst-güvenli:**
+inbox thread başına yalnızca ~2 mesaj önizler, bu yüzden bir thread'de yeni
+hareket olunca **tüm thread çekilir** ve her yeni mesaj teslim edilir — iki
+yoklama arasında birden fazla mesaj gelse bile **hiçbiri kaçmaz**.
+
+Her yoklamada iki olay tetiklenir — hangisini istersen onu dinle:
+
+| Olay | Ne zaman | Yük |
+|---|---|---|
+| `messageReceived` | her yeni mesaj için **bir kez** | tek bir normalize mesaj |
+| `userMessages` | yeni mesajı olan her **thread/kişi** için bir kez | `{ threadId, threadTitle, from, fromId, sender, messages: [ … ] }` |
+
+Yani Alper bir döngüde 3, Mehmet 2 mesaj atarsa: 5 `messageReceived` **ve** 2
+`userMessages` olayı alırsın (Alper'in 3'ü bir dizi, sonra Mehmet'in 2'si).
 
 #### `bot.startMessageListener(options?)`
-Yoklamayı başlatır. Seçenekler: `interval` (ms, varsayılan 6000), `limit` (yoklama başına thread, varsayılan 20), `includeSelf` (varsayılan false), `emitExisting` (başlangıçta mevcut birikimi yay, varsayılan false), `enrichSender` (`sender`'a bio/takipçi sayıları/hikaye durumu ekler, her yeni gönderen için +1 istek, varsayılan false).
+Yoklamayı başlatır. Seçenekler: `interval` (ms, varsayılan 6000), `limit` (yoklama başına thread, varsayılan 20), `threadLimit` (aktif thread başına çekilen mesaj, varsayılan 25), `includeSelf` (varsayılan false), `emitExisting` (başlangıçta mevcut birikimi yay, varsayılan false), `enrichSender` (`sender`'a bio/takipçi sayıları/hikaye durumu ekler, her yeni gönderen için +1 istek, varsayılan false).
 
 #### `bot.stopMessageListener()`
 Yoklamayı durdurur ve arka plan sekmesini kapatır.
 
 ```js
-// Sana DM ile gelen her reel'i otomatik analiz et
+// Mesaj bazlı: sana DM ile gelen her reel'i otomatik analiz et
 bot.on('messageReceived', async (msg) => {
-  console.log(`@${msg.from} bir ${msg.type} gönderdi`); // type: 'text' | 'reel' | 'post' | …
+  console.log(`@${msg.from} bir ${msg.type} gönderdi — ${msg.sentAt}`);
+  if (msg.repliedTo) console.log(`  ↳ şunu yanıtlıyor ${msg.repliedTo.from}: "${msg.repliedTo.text}"`);
   if (msg.media?.type === 'reel') {
     const reel = await bot.analyzeReel(msg, { download: true, downloadDir: './reels' });
-    console.log(`↳ @${reel.author} — ${reel.likes} beğeni, ${reel.comments} yorum`);
-    console.log(`↳ açıklama: ${reel.caption}`);
+    console.log(`  ↳ @${reel.author} — ${reel.likes} beğeni, ${reel.comments} yorum`);
   }
+});
+
+// Kişi bazlı: her gönderenin yeni mesajlarını tek seferde işle
+bot.on('userMessages', ({ from, messages }) => {
+  console.log(`@${from} ${messages.length} yeni mesaj gönderdi`);
 });
 
 bot.on('ready', () => bot.startMessageListener({ interval: 5000 }));
@@ -344,7 +359,9 @@ bot.init();
   type,              // 'text' | 'reel' | 'post' | ham IG item_type
   text,              // metin içeriği (veya null)
   media,             // { type:'reel'|'post', shortcode, url }  — veya null
+  repliedTo,         // bir yanıtsa alıntılanan mesaj (aynı yapı) — değilse null
   timestamp,         // ms
+  sentAt,            // ISO tarih-saat metni
   sender: {          // kimden geldiği (ücretsiz, doğrudan gelen kutusundan)
     username, fullName /* ad-soyad */, avatar /* profil foto */, isVerified, isPrivate,
     accountType, hasHighlights,
@@ -429,7 +446,8 @@ bot.on('storyFailed',      (info)   => console.warn('Hikaye başarısız:', info
 bot.on('profileSetup',     (result) => console.log('Profil güncellendi:', result));
 bot.on('postDeleted',      (result) => console.log('Gönderi silindi:', result));
 bot.on('dmSent',           (result) => console.log('DM gönderildi:', result));
-bot.on('messageReceived',  (msg)    => console.log('Yeni DM:', msg.from, msg.type));
+bot.on('messageReceived',  (msg)    => console.log('Yeni DM:', msg.from, msg.type, msg.sentAt));
+bot.on('userMessages',     (grp)    => console.log(`${grp.from}: ${grp.messages.length} yeni`));
 bot.on('reelAnalyzed',     (result) => console.log('Reel analiz edildi:', result.shortcode));
 ```
 
