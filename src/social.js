@@ -312,20 +312,28 @@ module.exports = {
 
   /**
    * Start polling the DM inbox and emit a `messageReceived` event for every new
-   * incoming message. Each event payload is a normalized object:
-   *   { threadId, threadTitle, itemId, from, fromId, fromSelf, type, text, media, timestamp }
-   * where `type` is "text" | "reel" | "post" | (raw IG item_type), and `media`
-   * (for shared reels/posts) is { type, shortcode, url } — feed that straight
-   * into `analyzeReel(msg)`.
+   * incoming message. Each payload is a normalized object:
+   *   { threadId, threadTitle, itemId, from, fromId, fromSelf, type, text, media,
+   *     timestamp, sender }
+   * where `type` is "text" | "reel" | "post" | (raw IG item_type), `media`
+   * (shared reels/posts) is { type, shortcode, url } — feed straight into
+   * `analyzeReel(msg)` — and `sender` describes who sent it:
+   *   sender = { username, fullName, avatar, isVerified, isPrivate, accountType,
+   *              hasHighlights, friendship:{following,followedBy,isBestie,muting,
+   *              blocking,restricted}, lastActiveAt }
+   * These come free from the inbox payload. With `enrichSender: true`, each new
+   * sender is additionally augmented (one extra request each) with:
+   *   sender += { bio, followers, following, posts, externalUrl,
+   *               hasActiveStory, storyCount }
    *
-   * Polling runs on a dedicated background tab so it doesn't disturb other
-   * actions on the main page.
+   * Polling runs on a dedicated background tab so it doesn't disturb the main page.
    *
    * @param {object} [options]
-   * @param {number}  [options.interval=6000]     - poll period (ms)
-   * @param {number}  [options.limit=20]          - threads to scan per poll
-   * @param {boolean} [options.includeSelf=false] - also emit your own messages
-   * @param {boolean} [options.emitExisting=false]- emit the current backlog on start
+   * @param {number}  [options.interval=6000]      - poll period (ms)
+   * @param {number}  [options.limit=20]           - threads to scan per poll
+   * @param {boolean} [options.includeSelf=false]  - also emit your own messages
+   * @param {boolean} [options.emitExisting=false] - emit the current backlog on start
+   * @param {boolean} [options.enrichSender=false] - add bio/followers/story to sender
    */
   async startMessageListener(options = {}) {
     this._ensureReady();
@@ -335,6 +343,7 @@ module.exports = {
     const limit = options.limit || 20;
     const includeSelf = !!options.includeSelf;
     const emitExisting = !!options.emitExisting;
+    const enrichSender = !!options.enrichSender;
 
     this._msgSeen = new Set();
     this._msgPage = await this.context.newPage();
@@ -355,7 +364,7 @@ module.exports = {
           const out = [];
           for (const t of threads) {
             const umap = {};
-            (t.users || []).forEach(u => { umap[String(u.pk)] = u.username; });
+            (t.users || []).forEach(u => { umap[String(u.pk)] = u; });
             for (const it of (t.items || [])) {
               const sid = String(it.user_id);
               let type = it.item_type, text = it.text || null, media = null;
@@ -369,15 +378,35 @@ module.exports = {
                 type = "post";
                 media = { type: "post", shortcode: it.media_share.code, url: `https://www.instagram.com/p/${it.media_share.code}/` };
               }
+              // Sender profile (free, from the inbox users[] + last_seen_at).
+              const su = umap[sid];
+              const ls = t.last_seen_at && t.last_seen_at[sid];
+              const fs = su && su.friendship_status;
+              const sender = su ? {
+                username: su.username,
+                fullName: su.full_name || null,
+                avatar: su.profile_pic_url || null,
+                isVerified: !!su.is_verified,
+                isPrivate: !!su.is_private,
+                accountType: su.account_type || null,
+                hasHighlights: !!su.has_highlight_reels,
+                friendship: fs ? {
+                  following: !!fs.following, followedBy: !!fs.followed_by,
+                  isBestie: !!fs.is_bestie, muting: !!fs.muting,
+                  blocking: !!fs.blocking, restricted: !!fs.is_restricted,
+                } : null,
+                lastActiveAt: ls && ls.timestamp ? Math.round(Number(ls.timestamp) / 1000) : null,
+              } : null;
               out.push({
                 threadId: t.thread_id,
                 threadTitle: t.thread_title || null,
                 itemId: it.item_id,
-                from: umap[sid] || (sid === viewerId ? "(self)" : sid),
+                from: (su && su.username) || (sid === viewerId ? "(self)" : sid),
                 fromId: sid,
                 fromSelf: !!it.is_sent_by_viewer || sid === viewerId,
                 type, text, media,
                 timestamp: Math.round((it.timestamp || 0) / 1000),
+                sender,
               });
             }
           }
@@ -390,6 +419,9 @@ module.exports = {
           this._msgSeen.add(msg.itemId);
           if (!seeded && !emitExisting) continue;          // seed silently on first poll
           if (msg.fromSelf && !includeSelf) continue;
+          if (enrichSender && msg.sender && !msg.fromSelf) {
+            await this._enrichSender(msg.sender, msg.fromId).catch(() => {});
+          }
           this.emit("messageReceived", msg);
         }
         seeded = true;
@@ -401,6 +433,50 @@ module.exports = {
     this._msgTimer = setInterval(poll, interval);
     this.emit("messageListenerStarted", { interval });
     return this;
+  },
+
+  /**
+   * Augment a `sender` object (from the message listener) with profile stats and
+   * live story status — bio, followers, following, posts, externalUrl,
+   * hasActiveStory, storyCount. Mutates `sender` in place. @private
+   */
+  async _enrichSender(sender, userId) {
+    const page = this._msgPage || this.page;
+    const extra = await page.evaluate(async ({ uname, uid }) => {
+      const APP = "936619743392459";
+      const r = {};
+      // Profile stats (bio, follower/following/post counts, external url).
+      try {
+        const rp = await fetch(`/api/v1/users/web_profile_info/?username=${encodeURIComponent(uname)}`,
+          { headers: { "x-ig-app-id": APP }, credentials: "include" });
+        if (rp.ok) {
+          const j = await rp.json();
+          const u = j.data && j.data.user;
+          if (u) {
+            r.bio = u.biography || "";
+            r.followers = u.edge_followed_by ? u.edge_followed_by.count : null;
+            r.following = u.edge_follow ? u.edge_follow.count : null;
+            r.posts = u.edge_owner_to_timeline_media ? u.edge_owner_to_timeline_media.count : null;
+            r.externalUrl = u.external_url || null;
+          }
+        }
+      } catch (_) {}
+      // Live story status.
+      try {
+        const rs = await fetch(`/api/v1/feed/reels_media/?reel_ids=${uid}`,
+          { headers: { "x-ig-app-id": APP }, credentials: "include" });
+        if (rs.ok) {
+          const js = await rs.json();
+          const reel = js.reels && js.reels[uid];
+          const count = reel ? (reel.media_count || (reel.items ? reel.items.length : 0)) : 0;
+          r.hasActiveStory = count > 0;
+          r.storyCount = count;
+        } else { r.hasActiveStory = false; r.storyCount = 0; }
+      } catch (_) {}
+      return r;
+    }, { uname: sender.username, uid: String(userId) });
+    Object.assign(sender, extra);
+    return sender;
   },
 
   /** Stop the DM message listener and close its background tab. */

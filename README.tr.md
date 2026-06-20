@@ -313,7 +313,7 @@ DM gelen kutusunu yoklar ve gelen mesajlara anında tepki verir. Her
 verebileceğin hazır bir `media` nesnesi.
 
 #### `bot.startMessageListener(options?)`
-Yoklamayı başlatır. Seçenekler: `interval` (ms, varsayılan 6000), `limit` (yoklama başına thread, varsayılan 20), `includeSelf` (varsayılan false), `emitExisting` (başlangıçta mevcut birikimi yay, varsayılan false).
+Yoklamayı başlatır. Seçenekler: `interval` (ms, varsayılan 6000), `limit` (yoklama başına thread, varsayılan 20), `includeSelf` (varsayılan false), `emitExisting` (başlangıçta mevcut birikimi yay, varsayılan false), `enrichSender` (`sender`'a bio/takipçi sayıları/hikaye durumu ekler, her yeni gönderen için +1 istek, varsayılan false).
 
 #### `bot.stopMessageListener()`
 Yoklamayı durdurur ve arka plan sekmesini kapatır.
@@ -345,6 +345,14 @@ bot.init();
   text,              // metin içeriği (veya null)
   media,             // { type:'reel'|'post', shortcode, url }  — veya null
   timestamp,         // ms
+  sender: {          // kimden geldiği (ücretsiz, doğrudan gelen kutusundan)
+    username, fullName /* ad-soyad */, avatar /* profil foto */, isVerified, isPrivate,
+    accountType, hasHighlights,
+    friendship: { following, followedBy, isBestie, muting, blocking, restricted },
+    lastActiveAt,    // ms — bu sohbette son görülme (web'de canlı "online" bilgisi yok)
+    // enrichSender: true ile ayrıca:
+    bio, followers, following, posts, externalUrl, hasActiveStory, storyCount,
+  },
 }
 ```
 

@@ -313,7 +313,7 @@ message **type** — and for a shared reel/post, a ready-to-use `media` object y
 can hand straight to `analyzeReel`.
 
 #### `bot.startMessageListener(options?)`
-Start polling. Options: `interval` (ms, default 6000), `limit` (threads per poll, default 20), `includeSelf` (default false), `emitExisting` (emit the current backlog on start, default false).
+Start polling. Options: `interval` (ms, default 6000), `limit` (threads per poll, default 20), `includeSelf` (default false), `emitExisting` (emit the current backlog on start, default false), `enrichSender` (add bio/follower counts/story status to `sender`, one extra request per new sender, default false).
 
 #### `bot.stopMessageListener()`
 Stop polling and close the background tab.
@@ -345,6 +345,14 @@ bot.init();
   text,              // text content (or null)
   media,             // { type:'reel'|'post', shortcode, url }  — or null
   timestamp,         // ms
+  sender: {          // who sent it (free, straight from the inbox)
+    username, fullName, avatar /* profile pic */, isVerified, isPrivate,
+    accountType, hasHighlights,
+    friendship: { following, followedBy, isBestie, muting, blocking, restricted },
+    lastActiveAt,    // ms — last seen in this thread (web has no live "online" flag)
+    // with enrichSender: true, also:
+    bio, followers, following, posts, externalUrl, hasActiveStory, storyCount,
+  },
 }
 ```
 
