@@ -24,8 +24,8 @@ No API key. No OAuth. Just a real browser session, human-like behaviour, and a c
 | **Engagement** | Like, unlike, comment, save, unsave |
 | **Social** | Follow, unfollow, send DM, react to DM messages, view & react to story |
 | **Scraping** | Profile stats, post stats, comments, followers/following, search, hashtag posts, inbox |
-| **Reels** | Scrape the reels feed, enriched reel stats + cover thumbnail, reel video download, full reel analysis (caption/likes/comments) |
-| **Realtime** | DM message listener — `messageReceived` event with sender/type/shared-media |
+| **Reels & Posts** | Scrape the reels feed, reel/post analysis — download reel video, or every carousel image + the attached music — with caption/likes/comments |
+| **Realtime** | DM message listener (`messageReceived`/`userMessages`), mention/notification listener (`mentioned`) |
 | **Session** | Export raw cookies (e.g. for `yt-dlp`) |
 | **Safety** | Built-in rate limiter, human-like delays, anti-detection stealth, persistent sessions |
 
@@ -221,6 +221,24 @@ const a = await bot.analyzeReel('https://www.instagram.com/reel/SHORTCODE/', {
 
 Emits `reelAnalyzed`.
 
+#### `bot.analyzePost(input, options?)` → `PostAnalysis`
+Like `analyzeReel`, but for **photo posts and carousels** — downloads **every image** (and any video) plus the attached **music/audio** when present, and returns the caption, counts and sample comments. `input` can be a post URL, a shortcode, or a `messageReceived` message with a shared post.
+
+```js
+const a = await bot.analyzePost('https://www.instagram.com/p/SHORTCODE/', {
+  download: true, downloadMusic: true, downloadDir: './posts', commentCount: 12,
+});
+// {
+//   url, shortcode, mediaId, author, caption, likes, comments, plays,
+//   mediaType, isCarousel, publishedAt,
+//   music: { title, artist, audioType, downloadUrl, download:{ path, bytes } } | null,
+//   items: [ { index, type:'image'|'video', url, download:{ path, bytes } } ],
+//   sampleComments, timestamp,
+// }
+```
+
+Emits `postAnalyzed`.
+
 ---
 
 ### Write — Publishing
@@ -272,6 +290,15 @@ Bookmark / remove bookmark from a post.
 
 #### `bot.comment(postUrl, text)` → `CommentResult`
 Post a comment on a post.
+
+#### `bot.replyToComment(postUrl, target, text)` → `Result`
+Reply to a specific comment (a threaded reply). `target` is the **comment id**, a **commenter username**, a **comment text**, or a `mentioned` event object. Posts via Instagram's web comment endpoint and returns the new reply's `commentId`. Perfect with the mention listener:
+
+```js
+bot.on('mentioned', (n) => {
+  if (n.media?.url) bot.replyToComment(n.media.url, n.from, 'thanks for the tag! 🙌');
+});
+```
 
 #### `bot.searchAndLike(hashtag, count?)` → `{ hashtag, liked, requested }`
 Scrape the top posts under a hashtag and like up to `count` of them (default 5), with randomized delays between likes.
@@ -387,6 +414,32 @@ bot.init();
 
 ---
 
+## 🔔 Mentions & Notifications
+
+Watch the activity feed and react when someone **@mentions you in a comment** (or
+tags you). Each poll reads the notifications page (loaded over an authenticated
+GraphQL call) and parses it.
+
+#### `bot.startMentionListener(options?)` / `bot.stopMentionListener()`
+Options: `interval` (ms, default 20000), `emitExisting` (default false), `mentionsOnly` (skip likes/follows entirely, default false).
+
+Emits `notification` for every new item and `mentioned` for the mention/comment/tag subset:
+
+```js
+bot.on('mentioned', async (n) => {
+  console.log(`@${n.from} ${n.kind} you: "${n.text}"`);   // kind: 'mention' | 'comment' | 'tag'
+  if (n.media?.url) {                                      // the post you were mentioned on
+    const post = await bot.analyzePost(n.media.url, { downloadDir: './mentions' });
+    console.log(`↳ ${post.author}, ${post.likes} likes`);
+  }
+});
+bot.on('ready', () => bot.startMentionListener({ interval: 20000 }));
+```
+
+**Payload:** `{ id, kind, type, storyType, from, fromId, text, media, timestamp, sentAt }` — `kind` is `'mention' | 'comment' | 'like' | 'follow' | 'tag' | 'other'`; `media` (when present) is `{ id, shortcode, url }`.
+
+---
+
 ## ⚙️ Configuration
 
 ```js
@@ -447,6 +500,7 @@ bot.on('actionBlocked',    (info)   => console.warn('Blocked:', info));
 bot.on('challengeRequired',()       => console.warn('Challenge triggered'));
 bot.on('postLiked',        (result) => console.log('Liked:', result));
 bot.on('postCommented',    (result) => console.log('Commented:', result));
+bot.on('commentReplied',   (result) => console.log('Replied to comment:', result.commentId));
 bot.on('userFollowed',     (result) => console.log('Followed:', result));
 bot.on('userUnfollowed',   (result) => console.log('Unfollowed:', result));
 bot.on('postPublished',    (result) => console.log('Published:', result));
@@ -460,6 +514,9 @@ bot.on('messageReceived',  (msg)    => console.log('New DM:', msg.from, msg.type
 bot.on('userMessages',     (grp)    => console.log(`${grp.from}: ${grp.messages.length} new`));
 bot.on('messageReacted',   (result) => console.log('Reacted:', result.emoji));
 bot.on('reelAnalyzed',     (result) => console.log('Reel analyzed:', result.shortcode));
+bot.on('postAnalyzed',     (result) => console.log('Post analyzed:', result.shortcode));
+bot.on('mentioned',        (n)      => console.log('Mentioned by:', n.from));
+bot.on('notification',     (n)      => console.log('Notification:', n.kind, n.from));
 ```
 
 ---

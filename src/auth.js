@@ -192,6 +192,9 @@ module.exports = {
     if (this._msgTimer && this.stopMessageListener) {
       await this.stopMessageListener().catch(() => {});
     }
+    if (this._notifTimer && this.stopMentionListener) {
+      await this.stopMentionListener().catch(() => {});
+    }
     if (this.browser) {
       await this.browser.close();
     } else if (this.context) {

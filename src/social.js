@@ -679,5 +679,133 @@ module.exports = {
     if (this._msgPage) { await this._msgPage.close().catch(() => {}); this._msgPage = null; }
     this._msgPolling = false;
     this.emit("messageListenerStopped");
+  },
+
+  /** Normalize a raw activity-inbox story into a public notification object. @private */
+  _normalizeNotification(s) {
+    const a = (s && s.args) || {};
+    const text = a.text || "";
+    if (!text && !a.profile_name) return null;
+    let kind = "other";
+    if (/mentioned you/i.test(text) || /bir yorumda senden bahsetti|yorumda bahsetti/i.test(text)) kind = "mention";
+    else if (/commented|replied|yorum yaptı|yanıtladı/i.test(text)) kind = "comment";
+    else if (/liked|beğendi/i.test(text)) kind = "like";
+    else if (/started following|followed you|seni takip etmeye başladı|takip etti/i.test(text)) kind = "follow";
+    else if (/tagged you|seni etiketledi|bir gönderide etiketledi/i.test(text)) kind = "tag";
+
+    // Related media → post url. First from a media id (possibly "mediaid_userid"),
+    // else by scanning the args for an embedded /p/ or /reel/ permalink.
+    let media = null;
+    const mid = a.media && (a.media.id || a.media.pk);
+    if (mid) {
+      const code = this._mediaIdToShortcode(mid);
+      media = { id: String(mid).split("_")[0], shortcode: code, url: code ? `https://www.instagram.com/p/${code}/` : null };
+    }
+    if (!media) {
+      const blob = JSON.stringify(a);
+      const pm = blob.match(/\/(p|reel|reels)\/([A-Za-z0-9_-]{5,})/);
+      if (pm) media = { id: null, shortcode: pm[2], url: `https://www.instagram.com/${pm[1] === "p" ? "p" : "reel"}/${pm[2]}/` };
+    }
+    const tsMs = Math.round((a.timestamp || 0) * 1000);
+    return {
+      id: s.pk || a.aytm_notif_id || `${a.profile_id || "x"}_${a.timestamp || ""}`,
+      kind,
+      type: s.type,
+      storyType: s.story_type,
+      from: a.profile_name || null,
+      fromId: a.profile_id || null,
+      text,
+      media,
+      timestamp: tsMs,
+      sentAt: tsMs ? new Date(tsMs).toISOString() : null,
+    };
+  },
+
+  /**
+   * Watch the activity/notifications feed and emit events for new ones — most
+   * usefully when someone **@mentions you in a comment**. Each poll opens the
+   * notifications page (which loads the data over an authenticated GraphQL call)
+   * and parses the captured response.
+   *
+   * Emits:
+   *   - `notification` — for every new notification (any kind)
+   *   - `mentioned`    — only comment mentions / @-tags (a subset), with the
+   *                      related post in `media` (pass to analyzePost/analyzeReel)
+   *
+   * Each payload: { id, kind, type, storyType, from, fromId, text, media, timestamp, sentAt }
+   * where `kind` is 'mention' | 'comment' | 'like' | 'follow' | 'tag' | 'other'
+   * and `media` (when present) is { id, shortcode, url }.
+   *
+   * @param {object} [options]
+   * @param {number}  [options.interval=20000]     - poll period (ms)
+   * @param {boolean} [options.emitExisting=false] - emit the current backlog on start
+   * @param {boolean} [options.mentionsOnly=false] - skip non-mention notifications entirely
+   */
+  async startMentionListener(options = {}) {
+    this._ensureReady();
+    if (this._notifTimer) return this;
+
+    const interval = options.interval || 20000;
+    const emitExisting = !!options.emitExisting;
+    const mentionsOnly = !!options.mentionsOnly;
+
+    this._notifSeen = new Set();
+    this._notifSinceTs = emitExisting ? 0 : Date.now();
+    this._notifPage = await this.context.newPage();
+
+    let seeded = false;
+    const poll = async () => {
+      if (this._notifPolling || !this._notifPage) return;
+      this._notifPolling = true;
+      try {
+        // Capture the activity-inbox GraphQL response that the page itself fires.
+        let captured = null;
+        const onResp = async (resp) => {
+          try {
+            if (!/graphql\/query/.test(resp.url())) return;
+            const b = await resp.text();
+            if (b.includes("xdt_activity_inbox")) captured = b;
+          } catch (_) {}
+        };
+        this._notifPage.on("response", onResp);
+        await this._notifPage.goto("https://www.instagram.com/notifications/", { waitUntil: "domcontentloaded" }).catch(() => {});
+        for (let i = 0; i < 12 && !captured; i++) await delay(700);
+        this._notifPage.off("response", onResp);
+        if (!captured) return;
+
+        let j; try { j = JSON.parse(captured); } catch (_) { return; }
+        const inbox = j.data && j.data.xdt_activity_inbox;
+        if (!inbox) return;
+        const stories = [...(inbox.new_stories || []), ...(inbox.old_stories || [])];
+        const notifs = stories.map(s => this._normalizeNotification(s)).filter(Boolean);
+        notifs.sort((a, b) => a.timestamp - b.timestamp);
+
+        for (const nt of notifs) {
+          if (this._notifSeen.has(nt.id)) continue;
+          this._notifSeen.add(nt.id);
+          if (!seeded && !emitExisting) continue;
+          if (!emitExisting && nt.timestamp <= this._notifSinceTs) continue;
+          const isMention = nt.kind === "mention" || nt.kind === "comment" || nt.kind === "tag";
+          if (mentionsOnly && !isMention) continue;
+          this.emit("notification", nt);
+          if (isMention) this.emit("mentioned", nt);
+        }
+        seeded = true;
+      } catch (_) { /* transient — retry next tick */ }
+      finally { this._notifPolling = false; }
+    };
+
+    await poll();                          // seed (or emit backlog)
+    this._notifTimer = setInterval(poll, interval);
+    this.emit("mentionListenerStarted", { interval });
+    return this;
+  },
+
+  /** Stop the mention/notification listener and close its background tab. */
+  async stopMentionListener() {
+    if (this._notifTimer) { clearInterval(this._notifTimer); this._notifTimer = null; }
+    if (this._notifPage) { await this._notifPage.close().catch(() => {}); this._notifPage = null; }
+    this._notifPolling = false;
+    this.emit("mentionListenerStopped");
   }
 };

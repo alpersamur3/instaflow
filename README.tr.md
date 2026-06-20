@@ -24,8 +24,8 @@ API anahtarı yok. OAuth yok. Sadece gerçek bir tarayıcı oturumu, insan benze
 | **Etkileşim** | Beğen, beğeniyi geri al, yorum, kaydet, kaydı kaldır |
 | **Sosyal** | Takip et, takipten çık, DM gönder, DM mesajlarına tepki ver, hikaye görüntüle & tepki ver |
 | **Kazıma (Scraping)** | Profil istatistikleri, gönderi istatistikleri, yorumlar, takipçi/takip edilen, arama, hashtag gönderileri, gelen kutusu |
-| **Reels** | Reels akışını kazı, zenginleştirilmiş reel istatistikleri + kapak küçük resmi, reel video indirme, tam reel analizi (açıklama/beğeni/yorum) |
-| **Gerçek Zamanlı** | DM mesaj dinleyici — gönderen/tür/paylaşılan-medya ile `messageReceived` olayı |
+| **Reels & Gönderiler** | Reels akışını kazı, reel/gönderi analizi — reel videosunu, ya da her carousel resmini + eklenen müziği indir — açıklama/beğeni/yorum ile |
+| **Gerçek Zamanlı** | DM mesaj dinleyici (`messageReceived`/`userMessages`), bahsetme/bildirim dinleyici (`mentioned`) |
 | **Oturum** | Ham çerezleri dışa aktar (ör. `yt-dlp` için) |
 | **Güvenlik** | Yerleşik hız sınırlayıcı, insan benzeri gecikmeler, tespit önleyici gizlilik, kalıcı oturumlar |
 
@@ -221,6 +221,24 @@ const a = await bot.analyzeReel('https://www.instagram.com/reel/SHORTCODE/', {
 
 `reelAnalyzed` olayını yayar.
 
+#### `bot.analyzePost(input, options?)` → `PostAnalysis`
+`analyzeReel` gibi ama **fotoğraf gönderileri ve carousel'ler** için — **her resmi** (ve varsa videoyu) artı varsa eklenen **müziği/sesi** indirir; açıklama, sayılar ve örnek yorumları döndürür. `input` bir gönderi URL'si, kısa kod veya paylaşılan gönderi taşıyan bir `messageReceived` mesajı olabilir.
+
+```js
+const a = await bot.analyzePost('https://www.instagram.com/p/SHORTCODE/', {
+  download: true, downloadMusic: true, downloadDir: './posts', commentCount: 12,
+});
+// {
+//   url, shortcode, mediaId, author, caption, likes, comments, plays,
+//   mediaType, isCarousel, publishedAt,
+//   music: { title, artist, audioType, downloadUrl, download:{ path, bytes } } | null,
+//   items: [ { index, type:'image'|'video', url, download:{ path, bytes } } ],
+//   sampleComments, timestamp,
+// }
+```
+
+`postAnalyzed` olayını yayar.
+
 ---
 
 ### Yazma — Yayınlama
@@ -272,6 +290,15 @@ Bir gönderiyi kaydet / kaydı kaldır.
 
 #### `bot.comment(postUrl, text)` → `CommentResult`
 Bir gönderiye yorum yapar.
+
+#### `bot.replyToComment(postUrl, target, text)` → `Result`
+Belirli bir yoruma yanıt verir (threaded reply). `target` **yorum id'si**, bir **yorumcu kullanıcı adı**, **yorum metni** veya bir `mentioned` event nesnesi olabilir. Instagram'ın web yorum endpoint'i üzerinden gönderir ve yeni yanıtın `commentId`'sini döndürür. Mention dinleyiciyle mükemmel uyum:
+
+```js
+bot.on('mentioned', (n) => {
+  if (n.media?.url) bot.replyToComment(n.media.url, n.from, 'etiket için sağ ol! 🙌');
+});
+```
 
 #### `bot.searchAndLike(hashtag, count?)` → `{ hashtag, liked, requested }`
 Bir hashtag altındaki en iyi gönderileri kazır ve `count` kadarını (varsayılan 5) beğeniler arası rastgele gecikmelerle beğenir.
@@ -386,6 +413,32 @@ bot.init();
 
 ---
 
+## 🔔 Bahsetmeler & Bildirimler
+
+Aktivite akışını izler ve biri seni **bir yorumda @ ile bahsedince** (veya
+etiketleyince) tepki verirsin. Her yoklamada bildirimler sayfası (kimlik
+doğrulamalı GraphQL çağrısıyla yüklenen) okunup parse edilir.
+
+#### `bot.startMentionListener(options?)` / `bot.stopMentionListener()`
+Seçenekler: `interval` (ms, varsayılan 20000), `emitExisting` (varsayılan false), `mentionsOnly` (beğeni/takip gibi diğerlerini tamamen atla, varsayılan false).
+
+Her yeni öğe için `notification`, bahsetme/yorum/etiket alt kümesi için `mentioned` yayar:
+
+```js
+bot.on('mentioned', async (n) => {
+  console.log(`@${n.from} seni ${n.kind}: "${n.text}"`);   // kind: 'mention' | 'comment' | 'tag'
+  if (n.media?.url) {                                       // bahsedildiğin gönderi
+    const post = await bot.analyzePost(n.media.url, { downloadDir: './mentions' });
+    console.log(`↳ ${post.author}, ${post.likes} beğeni`);
+  }
+});
+bot.on('ready', () => bot.startMentionListener({ interval: 20000 }));
+```
+
+**Yük:** `{ id, kind, type, storyType, from, fromId, text, media, timestamp, sentAt }` — `kind` değeri `'mention' | 'comment' | 'like' | 'follow' | 'tag' | 'other'`; `media` (varsa) `{ id, shortcode, url }`.
+
+---
+
 ## ⚙️ Yapılandırma
 
 ```js
@@ -446,6 +499,7 @@ bot.on('actionBlocked',    (info)   => console.warn('Engellendi:', info));
 bot.on('challengeRequired',()       => console.warn('Doğrulama tetiklendi'));
 bot.on('postLiked',        (result) => console.log('Beğenildi:', result));
 bot.on('postCommented',    (result) => console.log('Yorum yapıldı:', result));
+bot.on('commentReplied',   (result) => console.log('Yoruma yanıt verildi:', result.commentId));
 bot.on('userFollowed',     (result) => console.log('Takip edildi:', result));
 bot.on('userUnfollowed',   (result) => console.log('Takipten çıkıldı:', result));
 bot.on('postPublished',    (result) => console.log('Yayınlandı:', result));
@@ -459,6 +513,9 @@ bot.on('messageReceived',  (msg)    => console.log('Yeni DM:', msg.from, msg.typ
 bot.on('userMessages',     (grp)    => console.log(`${grp.from}: ${grp.messages.length} yeni`));
 bot.on('messageReacted',   (result) => console.log('Tepki verildi:', result.emoji));
 bot.on('reelAnalyzed',     (result) => console.log('Reel analiz edildi:', result.shortcode));
+bot.on('postAnalyzed',     (result) => console.log('Gönderi analiz edildi:', result.shortcode));
+bot.on('mentioned',        (n)      => console.log('Bahseden:', n.from));
+bot.on('notification',     (n)      => console.log('Bildirim:', n.kind, n.from));
 ```
 
 ---

@@ -564,6 +564,17 @@ module.exports = {
     return id.toString();
   },
 
+  /** Encode a numeric media id (or "mediaid_userid") back into its shortcode. */
+  _mediaIdToShortcode(id) {
+    const A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let n;
+    try { n = BigInt(String(id).split("_")[0]); } catch (_) { return null; }
+    if (n <= 0n) return null;
+    let s = "";
+    while (n > 0n) { s = A[Number(n % 64n)] + s; n = n / 64n; }
+    return s;
+  },
+
   /**
    * Full analysis of a reel for downstream/AI processing: downloads the video and
    * returns the caption, engagement counts and a sample of real comments. Uses
@@ -691,6 +702,153 @@ module.exports = {
       timestamp: new Date().toISOString(),
     };
     this.emit("reelAnalyzed", result);
+    return result;
+  },
+
+  /** Fetch a CDN url in the page context and write it to `dest`. @private */
+  async _fetchToFile(url, dest) {
+    if (!url) return null;
+    const arr = await this.page.evaluate(async (link) => {
+      try { const r = await fetch(link); const b = await r.arrayBuffer(); return Array.from(new Uint8Array(b)); }
+      catch { return null; }
+    }, url);
+    if (arr && arr.length > 1000) {
+      fs.writeFileSync(dest, Buffer.from(arr));
+      return { path: dest, bytes: arr.length };
+    }
+    return null;
+  },
+
+  /**
+   * Full analysis of a feed post for downstream/AI processing — like analyzeReel
+   * but for photo posts and **carousels**: downloads every image (and any video)
+   * plus the attached **music/audio** when present, and returns the caption,
+   * engagement counts and a sample of real comments. Uses Instagram's media
+   * info/comments JSON APIs.
+   *
+   * Accepts a post URL, a shortcode, or a `messageReceived` message object whose
+   * `media` is a shared post — so a DM'd post can be handed straight in.
+   *
+   * @param {string|object} input
+   * @param {object} [options]
+   * @param {boolean} [options.download=true]      - download images/videos
+   * @param {boolean} [options.downloadMusic=true] - also download the audio track
+   * @param {string}  [options.downloadDir="."]
+   * @param {number}  [options.commentCount=12]
+   * @returns {Promise<object>} { url, shortcode, mediaId, author, fullName, caption,
+   *   likes, comments, plays, mediaType, isCarousel, publishedAt, music,
+   *   items:[{ index, type, url, download }], sampleComments, timestamp }
+   */
+  async analyzePost(input, options = {}) {
+    this._ensureReady();
+    const { download = true, downloadMusic = true, downloadDir = ".", commentCount = 12 } = options;
+
+    let url;
+    if (typeof input === "string") {
+      url = input.startsWith("http") ? input : `https://www.instagram.com/p/${input}/`;
+    } else if (input && input.media && input.media.url) {
+      url = input.media.url;
+    } else if (input && input.url) {
+      url = input.url;
+    } else {
+      throw new Error("analyzePost: expected a post URL/shortcode or a message containing a shared post");
+    }
+
+    const m = url.match(/\/(p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+    const shortcode = m ? m[2] : (typeof input === "string" && !input.includes("/") ? input : null);
+    if (!shortcode) throw new Error("analyzePost: could not extract a shortcode from " + url);
+    const mediaId = this._shortcodeToMediaId(shortcode);
+
+    if (!this.page.url().includes("instagram.com")) {
+      await this.page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+      await delay(1500);
+    }
+
+    const data = await this.page.evaluate(async ({ mid, n }) => {
+      const APP = "936619743392459";
+      const out = { info: null, comments: [] };
+      const pickImg = (md) => (md.image_versions2 && md.image_versions2.candidates && md.image_versions2.candidates[0] && md.image_versions2.candidates[0].url) || null;
+      const pickVid = (md) => (md.video_versions && md.video_versions[0] && md.video_versions[0].url) || null;
+      try {
+        const r = await fetch(`/api/v1/media/${mid}/info/`, { headers: { "x-ig-app-id": APP }, credentials: "include" });
+        if (r.ok) {
+          const j = await r.json();
+          const md = j.items && j.items[0];
+          if (md) {
+            let items = [];
+            if (md.carousel_media && md.carousel_media.length) {
+              items = md.carousel_media.map(c => ({ type: c.media_type === 2 ? "video" : "image", imageUrl: pickImg(c), videoUrl: c.media_type === 2 ? pickVid(c) : null }));
+            } else {
+              items = [{ type: md.media_type === 2 ? "video" : "image", imageUrl: pickImg(md), videoUrl: md.media_type === 2 ? pickVid(md) : null }];
+            }
+            let music = null;
+            const mm = md.music_metadata && md.music_metadata.music_info && md.music_metadata.music_info.music_asset_info;
+            const cm = md.clips_metadata;
+            if (mm) {
+              music = { title: mm.title || null, artist: mm.display_artist || null, audioType: md.music_metadata.audio_type || "licensed_music", downloadUrl: mm.progressive_download_url || null };
+            } else if (cm && cm.music_info && cm.music_info.music_asset_info) {
+              const a = cm.music_info.music_asset_info;
+              music = { title: a.title || null, artist: a.display_artist || null, audioType: "clips_music", downloadUrl: a.progressive_download_url || null };
+            } else if (cm && cm.original_sound_info) {
+              music = { title: cm.original_sound_info.original_audio_title || "Original audio", artist: (cm.original_sound_info.ig_artist && cm.original_sound_info.ig_artist.username) || null, audioType: "original", downloadUrl: cm.original_sound_info.progressive_download_url || null };
+            }
+            out.info = {
+              author: md.user && md.user.username, fullName: md.user && md.user.full_name,
+              mediaType: md.media_type, isCarousel: !!(md.carousel_media && md.carousel_media.length),
+              likes: md.like_count, comments: md.comment_count, plays: md.play_count || md.ig_play_count || null,
+              caption: (md.caption && md.caption.text) || "", takenAt: md.taken_at, items, music,
+            };
+          }
+        }
+      } catch (_) {}
+      try {
+        const rc = await fetch(`/api/v1/media/${mid}/comments/?can_support_threading=true&permalink_enabled=false`, { headers: { "x-ig-app-id": APP }, credentials: "include" });
+        if (rc.ok) {
+          const jc = await rc.json();
+          out.comments = (jc.comments || []).slice(0, n).map(c => ({ username: c.user && c.user.username, text: c.text, likes: c.comment_like_count || 0, createdAt: c.created_at }));
+        }
+      } catch (_) {}
+      return out;
+    }, { mid: mediaId, n: commentCount });
+
+    if (!data.info) {
+      throw new Error(`analyzePost: could not load media info for ${shortcode} (private, removed, or unavailable?)`);
+    }
+
+    // Download every image/video, then the audio track.
+    const items = data.info.items.map((it, i) => ({ index: i, type: it.type, url: it.videoUrl || it.imageUrl, _img: it.imageUrl, _vid: it.videoUrl }));
+    if (download) {
+      for (const it of items) {
+        const ext = it.type === "video" ? "mp4" : "jpg";
+        const dest = path.join(downloadDir, `${shortcode}_${it.index + 1}.${ext}`);
+        try { it.download = await this._fetchToFile(it.url, dest); }
+        catch (e) { it.download = { error: e.message }; }
+      }
+    }
+    let music = data.info.music;
+    if (music && downloadMusic && music.downloadUrl) {
+      const dest = path.join(downloadDir, `${shortcode}_audio.mp4`);
+      try { music = { ...music, download: await this._fetchToFile(music.downloadUrl, dest) }; }
+      catch (e) { music = { ...music, download: { error: e.message } }; }
+    }
+
+    const result = {
+      url, shortcode, mediaId,
+      author: data.info.author,
+      fullName: data.info.fullName,
+      caption: data.info.caption,
+      likes: data.info.likes,
+      comments: data.info.comments,
+      plays: data.info.plays,
+      mediaType: data.info.mediaType,
+      isCarousel: data.info.isCarousel,
+      publishedAt: data.info.takenAt ? new Date(data.info.takenAt * 1000).toISOString() : null,
+      music,
+      items: items.map(it => ({ index: it.index, type: it.type, url: it.url, download: it.download || null })),
+      sampleComments: data.comments,
+      timestamp: new Date().toISOString(),
+    };
+    this.emit("postAnalyzed", result);
     return result;
   },
 

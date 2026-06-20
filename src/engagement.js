@@ -72,6 +72,85 @@ module.exports = {
   },
 
   /**
+   * Reply to a specific comment on a post — a threaded reply that @mentions the
+   * commenter. Pairs with the mention listener: when someone @mentions you in a
+   * comment, reply right under it. Posts via Instagram's web comment endpoint
+   * (reliable), so it also returns the new reply's id.
+   *
+   * @param {string} postUrl - post URL or shortcode
+   * @param {string|number|object} target - the comment id to reply to, or a
+   *   commenter USERNAME / comment TEXT to look it up by (or `{ commentId }` /
+   *   `{ username }` / `{ text }`). A `mentioned` event object works directly
+   *   (uses its `commentId`, else `from`).
+   * @param {string} text - reply text
+   * @returns {Promise<{success:boolean,postUrl:string,repliedToCommentId:string,commentId:string,text:string,timestamp:string}>}
+   */
+  async replyToComment(postUrl, target, text) {
+    this._ensureReady();
+    this._checkRateLimit("comment");
+    const url = postUrl.startsWith("http") ? postUrl : `https://www.instagram.com/p/${postUrl}/`;
+    const m = url.match(/\/(p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+    const shortcode = m ? m[2] : postUrl;
+    const mediaId = this._shortcodeToMediaId(shortcode);
+
+    if (!this.page.url().includes("instagram.com")) {
+      await this.page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+      await delay(1200);
+    }
+
+    try {
+      // Resolve the comment id to reply to.
+      let commentId = null;
+      const direct = (target && typeof target === "object")
+        ? (target.commentId || target.comment_id || target.id)
+        : target;
+      if (direct != null && /^\d+$/.test(String(direct))) {
+        commentId = String(direct);
+      } else {
+        const needle = (typeof target === "string" ? target : (target && (target.username || target.text)) || "").replace(/^@/, "");
+        if (!needle) throw new Error("replyToComment: provide a comment id, commenter username, or comment text");
+        commentId = await this.page.evaluate(async ({ mid, needle }) => {
+          const r = await fetch(`/api/v1/media/${mid}/comments/?can_support_threading=true&permalink_enabled=false`,
+            { headers: { "x-ig-app-id": "936619743392459" }, credentials: "include" });
+          if (!r.ok) return null;
+          const j = await r.json();
+          const lc = needle.toLowerCase();
+          const comments = j.comments || [];
+          const c = comments.find(x => ((x.user && x.user.username) || "").toLowerCase() === lc)
+                 || comments.find(x => (x.text || "").toLowerCase().includes(lc));
+          return c ? c.pk : null;
+        }, { mid: mediaId, needle });
+        if (!commentId) throw new Error(`replyToComment: no comment matching "${needle}" found on this post`);
+      }
+
+      // Post the reply via the web comment endpoint.
+      const res = await this.page.evaluate(async ({ mid, cid, text }) => {
+        const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || "";
+        const r = await fetch(`/api/v1/web/comments/${mid}/add/`, {
+          method: "POST",
+          headers: { "x-ig-app-id": "936619743392459", "x-csrftoken": csrf, "content-type": "application/x-www-form-urlencoded" },
+          credentials: "include",
+          body: new URLSearchParams({ comment_text: text, replied_to_comment_id: String(cid) }).toString(),
+        });
+        let j = null; try { j = await r.json(); } catch (_) {}
+        return { status: r.status, ok: j && j.status === "ok", id: j && j.id, message: j && j.message };
+      }, { mid: mediaId, cid: commentId, text });
+
+      if (!res.ok) {
+        throw new Error(`replyToComment: failed (status ${res.status}${res.message ? " — " + res.message : ""})`);
+      }
+
+      const result = { success: true, postUrl: url, repliedToCommentId: commentId, commentId: res.id, text, timestamp: new Date().toISOString() };
+      this._recordAction("comment");
+      this.emit("commentReplied", result);
+      return result;
+    } catch (err) {
+      this.emit("commentFailed", { postUrl: url, text, error: err.message });
+      throw err;
+    }
+  },
+
+  /**
    * Like a specific post
    * @param {string} postUrl
    */
