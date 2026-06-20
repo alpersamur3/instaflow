@@ -421,22 +421,23 @@ tags you). Each poll reads the notifications page (loaded over an authenticated
 GraphQL call) and parses it.
 
 #### `bot.startMentionListener(options?)` / `bot.stopMentionListener()`
-Options: `interval` (ms, default 20000), `emitExisting` (default false), `mentionsOnly` (skip likes/follows entirely, default false).
+Options: `interval` (ms, default 20000), `emitExisting` (default false), `mentionsOnly` (skip likes/follows entirely, default false), `resolveComment` (for mentions, look up the actual comment id + text — one extra request; default true). Comment mentions land here whether the sender follows you or not.
 
 Emits `notification` for every new item and `mentioned` for the mention/comment/tag subset:
 
 ```js
 bot.on('mentioned', async (n) => {
-  console.log(`@${n.from} ${n.kind} you: "${n.text}"`);   // kind: 'mention' | 'comment' | 'tag'
-  if (n.media?.url) {                                      // the post you were mentioned on
-    const post = await bot.analyzePost(n.media.url, { downloadDir: './mentions' });
-    console.log(`↳ ${post.author}, ${post.likes} likes`);
-  }
+  console.log(`@${n.from} ${n.kind} you on ${n.media?.url}`);   // kind: 'mention' | 'comment' | 'tag'
+  // reply right under the comment you were tagged in
+  if (n.media?.url) await bot.replyToComment(n.media.url, n.comment?.id || n.from, 'thanks! 🙌');
 });
 bot.on('ready', () => bot.startMentionListener({ interval: 20000 }));
 ```
 
-**Payload:** `{ id, kind, type, storyType, from, fromId, text, media, timestamp, sentAt }` — `kind` is `'mention' | 'comment' | 'like' | 'follow' | 'tag' | 'other'`; `media` (when present) is `{ id, shortcode, url }`.
+**Payload:** `{ id, kind, type, storyType, from, fromId, text, media, comment, timestamp, sentAt }`
+- `kind`: `'mention' | 'comment' | 'like' | 'follow' | 'tag' | 'other'`
+- `media` (when present): `{ id, shortcode, url }` — the post/reel you were tagged on
+- `comment` (mentions, with `resolveComment`): `{ id, text, createdAt, likes }` — the actual comment
 
 ---
 

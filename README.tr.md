@@ -420,22 +420,23 @@ etiketleyince) tepki verirsin. Her yoklamada bildirimler sayfası (kimlik
 doğrulamalı GraphQL çağrısıyla yüklenen) okunup parse edilir.
 
 #### `bot.startMentionListener(options?)` / `bot.stopMentionListener()`
-Seçenekler: `interval` (ms, varsayılan 20000), `emitExisting` (varsayılan false), `mentionsOnly` (beğeni/takip gibi diğerlerini tamamen atla, varsayılan false).
+Seçenekler: `interval` (ms, varsayılan 20000), `emitExisting` (varsayılan false), `mentionsOnly` (beğeni/takip gibi diğerlerini tamamen atla, varsayılan false), `resolveComment` (bahsetmeler için gerçek yorum id'sini + metnini bulur — +1 istek; varsayılan true). Yorum bahsetmeleri, gönderen seni takip etse de etmese de buraya düşer.
 
 Her yeni öğe için `notification`, bahsetme/yorum/etiket alt kümesi için `mentioned` yayar:
 
 ```js
 bot.on('mentioned', async (n) => {
-  console.log(`@${n.from} seni ${n.kind}: "${n.text}"`);   // kind: 'mention' | 'comment' | 'tag'
-  if (n.media?.url) {                                       // bahsedildiğin gönderi
-    const post = await bot.analyzePost(n.media.url, { downloadDir: './mentions' });
-    console.log(`↳ ${post.author}, ${post.likes} beğeni`);
-  }
+  console.log(`@${n.from} seni ${n.kind}: ${n.media?.url}`);   // kind: 'mention' | 'comment' | 'tag'
+  // etiketlendiğin yorumun hemen altına yanıt ver
+  if (n.media?.url) await bot.replyToComment(n.media.url, n.comment?.id || n.from, 'sağ ol! 🙌');
 });
 bot.on('ready', () => bot.startMentionListener({ interval: 20000 }));
 ```
 
-**Yük:** `{ id, kind, type, storyType, from, fromId, text, media, timestamp, sentAt }` — `kind` değeri `'mention' | 'comment' | 'like' | 'follow' | 'tag' | 'other'`; `media` (varsa) `{ id, shortcode, url }`.
+**Yük:** `{ id, kind, type, storyType, from, fromId, text, media, comment, timestamp, sentAt }`
+- `kind`: `'mention' | 'comment' | 'like' | 'follow' | 'tag' | 'other'`
+- `media` (varsa): `{ id, shortcode, url }` — etiketlendiğin gönderi/reel
+- `comment` (bahsetmelerde, `resolveComment` ile): `{ id, text, createdAt, likes }` — gerçek yorum
 
 ---
 

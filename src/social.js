@@ -681,6 +681,29 @@ module.exports = {
     this.emit("messageListenerStopped");
   },
 
+  /**
+   * For a comment mention, look up the actual comment (id + text) by the
+   * commenter on the post — the notification itself doesn't include it. @private
+   */
+  async _resolveMentionComment(page, shortcode, commenter, myUsername) {
+    const mediaId = this._shortcodeToMediaId(shortcode);
+    if (!mediaId) return null;
+    return page.evaluate(async ({ mid, commenter, me }) => {
+      try {
+        const r = await fetch(`/api/v1/media/${mid}/comments/?can_support_threading=true&permalink_enabled=false`,
+          { headers: { "x-ig-app-id": "936619743392459" }, credentials: "include" });
+        if (!r.ok) return null;
+        const j = await r.json();
+        const comments = j.comments || [];
+        const lc = (commenter || "").toLowerCase();
+        const tag = "@" + (me || "").toLowerCase();
+        const c = comments.find(x => ((x.user && x.user.username) || "").toLowerCase() === lc && (x.text || "").toLowerCase().includes(tag))
+               || comments.find(x => ((x.user && x.user.username) || "").toLowerCase() === lc);
+        return c ? { id: c.pk, text: c.text, createdAt: c.created_at, likes: c.comment_like_count || 0 } : null;
+      } catch (_) { return null; }
+    }, { mid: mediaId, commenter, me: myUsername });
+  },
+
   /** Normalize a raw activity-inbox story into a public notification object. @private */
   _normalizeNotification(s) {
     const a = (s && s.args) || {};
@@ -693,13 +716,24 @@ module.exports = {
     else if (/started following|followed you|seni takip etmeye başladı|takip etti/i.test(text)) kind = "follow";
     else if (/tagged you|seni etiketledi|bir gönderide etiketledi/i.test(text)) kind = "tag";
 
-    // Related media → post url. First from a media id (possibly "mediaid_userid"),
-    // else by scanning the args for an embedded /p/ or /reel/ permalink.
+    // Related media → post url. Try, in order: an explicit media id, the
+    // `destination` deep-link (e.g. "clips_home?id=<mediaid>_<userid>" /
+    // "media?id=..."), then any embedded /p/ or /reel/ permalink.
     let media = null;
     const mid = a.media && (a.media.id || a.media.pk);
     if (mid) {
       const code = this._mediaIdToShortcode(mid);
       media = { id: String(mid).split("_")[0], shortcode: code, url: code ? `https://www.instagram.com/p/${code}/` : null };
+    }
+    if (!media && a.destination) {
+      const dm = String(a.destination).match(/id=(\d+)/);
+      if (dm) {
+        const code = this._mediaIdToShortcode(dm[1]);
+        if (code) {
+          const isReel = /clips_home|reel/i.test(a.destination);
+          media = { id: dm[1], shortcode: code, url: `https://www.instagram.com/${isReel ? "reel" : "p"}/${code}/` };
+        }
+      }
     }
     if (!media) {
       const blob = JSON.stringify(a);
@@ -748,6 +782,7 @@ module.exports = {
     const interval = options.interval || 20000;
     const emitExisting = !!options.emitExisting;
     const mentionsOnly = !!options.mentionsOnly;
+    const resolveComment = options.resolveComment !== false; // default true
 
     this._notifSeen = new Set();
     this._notifSinceTs = emitExisting ? 0 : Date.now();
@@ -787,6 +822,10 @@ module.exports = {
           if (!emitExisting && nt.timestamp <= this._notifSinceTs) continue;
           const isMention = nt.kind === "mention" || nt.kind === "comment" || nt.kind === "tag";
           if (mentionsOnly && !isMention) continue;
+          // Resolve the actual comment (id + text) the mention is about.
+          if (isMention && resolveComment && nt.media && nt.media.shortcode) {
+            nt.comment = await this._resolveMentionComment(this._notifPage, nt.media.shortcode, nt.from, this.username).catch(() => null);
+          }
           this.emit("notification", nt);
           if (isMention) this.emit("mentioned", nt);
         }
