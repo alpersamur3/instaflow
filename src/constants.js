@@ -22,4 +22,10 @@ const DEFAULT_RATE_LIMITS = {
   dm:       { hour: 10, day: 40  },
 };
 
-module.exports = { USER_AGENT, VIEWPORT, DEFAULT_RATE_LIMITS };
+/** Direct messages page; its realtime socket and GraphQL queries drive the DM listener. */
+const DIRECT_INBOX_URL = "https://www.instagram.com/direct/inbox/";
+
+/** Same-origin page without Instagram's app JS, for replaying queries cheaply. */
+const LIGHT_PAGE_URL = "https://www.instagram.com/robots.txt";
+
+module.exports = { USER_AGENT, VIEWPORT, DEFAULT_RATE_LIMITS, DIRECT_INBOX_URL, LIGHT_PAGE_URL };

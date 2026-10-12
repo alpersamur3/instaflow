@@ -13,6 +13,7 @@ const { DEFAULT_RATE_LIMITS } = require("./src/constants");
  *   - src/content.js     post / story / profile editing (publishing)
  *   - src/engagement.js  comment / like / save / bulk hashtag like
  *   - src/social.js      follow / unfollow / DM / story interactions, DM listener
+ *   - src/direct.js      DM inbox / thread reads over Instagram web GraphQL
  *   - src/insights.js    profile / post / reel scraping, search, inbox, download, reel analysis
  *
  * @example
@@ -79,6 +80,7 @@ Object.assign(
   require("./src/content"),
   require("./src/engagement"),
   require("./src/social"),
+  require("./src/direct"),
   require("./src/insights")
 );
 

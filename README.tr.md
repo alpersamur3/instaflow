@@ -180,7 +180,7 @@ Bir hashtag altındaki en iyi gönderileri kazır.
 DM konularını listeler; her biri `lastMessage` ile (tür, metin/medya, `sentAt`, gönderen).
 
 #### `bot.getMessages(threadId, count?)` → `{ messages }`
-Bir konudaki mesajları (thread API'siyle) okur. Her mesaj tam normalize — `{ itemId, from, fromId, fromSelf, type, text, media, repliedTo, timestamp, sentAt, sender }` — yani **tarih-saat** (`sentAt`) ve alıntılanan mesaj (`repliedTo`) de gelir.
+Bir konudaki mesajları (Instagram web GraphQL'i üzerinden) okur. Her mesaj tam normalize (`{ itemId, from, fromId, fromSelf, type, text, media, repliedTo, timestamp, sentAt, sender }`), yani **tarih-saat** (`sentAt`) ve alıntılanan mesaj (`repliedTo`) de gelir.
 
 ---
 
@@ -343,12 +343,19 @@ Mevcut oturum çerezlerini Playwright formatında döndürür — kimlik doğrul
 
 ## 📨 Gerçek Zamanlı DM Dinleyici
 
-DM gelen kutusunu yoklar ve gelen mesajlara anında tepki verir. **Burst-güvenli:**
-inbox thread başına yalnızca ~2 mesaj önizler, bu yüzden bir thread'de yeni
-hareket olunca **tüm thread çekilir** ve her yeni mesaj teslim edilir — iki
-yoklama arasında birden fazla mesaj gelse bile **hiçbiri kaçmaz**.
+Gelen mesajlara anında tepki verir. Varsayılan olarak **olay tabanlıdır**: bir
+arka plan sekmesi DM sayfasında açık kalır ve Instagram'ın kendi anlık soketini
+(okunmamış sayısını güncelleyen soket) dinler; oradan bir olay gelince gelen
+kutusu bir kez okunur. 5 dakikada bir yapılan güvenlik kontrolü dışında
+periyodik istek atılmaz. **Burst-güvenli:** bir thread'de yeni hareket olunca
+thread okunur ve her yeni mesaj teslim edilir; aynı anda birden fazla mesaj
+gelse bile **hiçbiri kaçmaz**.
 
-Her yoklamada iki olay tetiklenir — hangisini istersen onu dinle:
+DM'ler Instagram web GraphQL'i üzerinden okunur (eski `/api/v1/direct_v2/` REST
+uçları kaldırıldı). Sorgu kimlikleri ve token'lar DM sayfasının kendisinden
+öğrenilir, değişince yeniden öğrenilir; hiçbir şey koda gömülü değildir.
+
+Her okumada iki olay tetiklenir; hangisini istersen onu dinle:
 
 | Olay | Ne zaman | Yük |
 |---|---|---|
@@ -359,10 +366,15 @@ Yani Alper bir döngüde 3, Mehmet 2 mesaj atarsa: 5 `messageReceived` **ve** 2
 `userMessages` olayı alırsın (Alper'in 3'ü bir dizi, sonra Mehmet'in 2'si).
 
 #### `bot.startMessageListener(options?)`
-Yoklamayı başlatır. Seçenekler: `interval` (ms, varsayılan 6000), `limit` (yoklama başına thread, varsayılan 20), `threadLimit` (aktif thread başına çekilen mesaj, varsayılan 25), `includeSelf` (varsayılan false), `emitExisting` (başlangıçta mevcut birikimi yay, varsayılan false), `enrichSender` (`sender`'a bio/takipçi sayıları/hikaye durumu ekler, her yeni gönderen için +1 istek, varsayılan false).
+Dinlemeyi başlatır. Seçenekler: `mode` (`'realtime'` varsayılandır ve Instagram'ın soketini dinler; `'poll'` her `interval`'da ucuz okunmamış sayısını okur, gelen kutusunu yalnız o değişince okur), `interval` (ms, poll modu, varsayılan 6000), `fullInterval` (iki gelen kutusu okuması arasındaki en uzun süre; realtime 5 dk, poll 1 dk), `limit` (okuma başına thread, varsayılan 20), `threadLimit` (aktif thread başına çekilen mesaj, varsayılan 25), `includeSelf` (varsayılan false), `emitExisting` (başlangıçta mevcut birikimi yay, varsayılan false), `enrichSender` (`sender`'a bio/takipçi sayıları/hikaye durumu ekler, her yeni gönderen için +1 istek, varsayılan false).
+
+Hatalar yutulmaz, bildirilir: `messageListenerError` (`{ error, failures }`) ilk başarısız okumada ve art arda her 30'uncuda, `messageListenerRecovered` okuma yeniden çalışınca, `messageListenerReconnected` soket sessiz kaldığı için DM sayfası yeniden açılınca tetiklenir.
+
+#### `bot.getMessageListenerStatus()` → `{ mode, ok, at, error, failures, threads, lastEventAt }`
+Dinleyicinin son durumu (`ok` ilk okumadan önce `null`); dinleyici çalışmıyorsa `null`.
 
 #### `bot.stopMessageListener()`
-Yoklamayı durdurur ve arka plan sekmesini kapatır.
+Dinlemeyi durdurur ve arka plan sekmesini kapatır.
 
 ```js
 // Mesaj bazlı: sana DM ile gelen her reel'i otomatik analiz et
@@ -380,7 +392,7 @@ bot.on('userMessages', ({ from, messages }) => {
   console.log(`@${from} ${messages.length} yeni mesaj gönderdi`);
 });
 
-bot.on('ready', () => bot.startMessageListener({ interval: 5000 }));
+bot.on('ready', () => bot.startMessageListener());
 bot.init();
 ```
 
@@ -402,14 +414,14 @@ bot.init();
     username, fullName /* ad-soyad */, avatar /* profil foto */, isVerified, isPrivate,
     accountType, hasHighlights,
     friendship: { following, followedBy, isBestie, muting, blocking, restricted },
-    lastActiveAt,    // ms — bu sohbette son görülme (web'de canlı "online" bilgisi yok)
+    lastActiveAt,    // ms, bu sohbeti son okuduğu an (okundu bilgisi; web'de canlı "online" bilgisi yok)
     // enrichSender: true ile ayrıca:
     bio, followers, following, posts, externalUrl, hasActiveStory, storyCount,
   },
 }
 ```
 
-> Yoklama ayrı bir arka plan sekmesinde çalışır, diğer eylemlerini asla aksatmaz. Handler'ın ağır iş yapıyorsa (indirme, gezinme), sayfa işlemlerinin çakışmaması için sıraya al (ör. bir kuyruk).
+> Dinleyici ayrı bir arka plan sekmesinde çalışır, diğer eylemlerini asla aksatmaz. Handler'ın ağır iş yapıyorsa (indirme, gezinme), sayfa işlemlerinin çakışmaması için sıraya al (ör. bir kuyruk).
 
 ---
 

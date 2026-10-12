@@ -1110,6 +1110,11 @@ module.exports = {
         await delay(1000);
       }
       const summaries = await this._fetchInboxSummary(this.page, count);
+      // The inbox query carries no message bodies: read each thread's newest message.
+      for (const s of summaries) {
+        const raw = await this._fetchThreadRaw(this.page, s.threadId, 1).catch(() => null);
+        if (raw) { s.latestItem = raw.rawItems[0] || null; if (raw.users.length) s.users = raw.users; }
+      }
       const threads = summaries.map(s => {
         const umap = {};
         (s.users || []).forEach(u => { umap[u.pk] = u; });

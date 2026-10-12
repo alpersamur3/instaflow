@@ -2,36 +2,14 @@
 
 const { delay } = require("./utils");
 
-// ── Shared browser-side trimmers ────────────────────────────────────────────
-// Injected into page.evaluate() (and eval'd there) so the message listener,
-// getMessages and getInbox all normalize Instagram direct items the same way.
-// RAW_TRIM is a named function expression so it can recurse into quoted
-// (replied_to_message) items.
-const RAW_TRIM = `function __trim(it){
-  if(!it) return null;
-  return {
-    itemType: it.item_type,
-    itemId: it.item_id,
-    userId: String(it.user_id),
-    ts: it.timestamp,
-    text: it.text || null,
-    sentByViewer: !!it.is_sent_by_viewer,
-    clipCode: (it.clip && it.clip.clip && it.clip.clip.code) || null,
-    reelShareCode: (it.reel_share && it.reel_share.media && it.reel_share.media.code) || null,
-    reelShareText: (it.reel_share && it.reel_share.text) || null,
-    mediaShareCode: (it.media_share && it.media_share.code) || null,
-    replied: it.replied_to_message ? __trim(it.replied_to_message) : null
-  };
-}`;
+const { DIRECT_INBOX_URL, LIGHT_PAGE_URL } = require("./constants");
 
-const USER_TRIM = `function __utrim(u){
-  return {
-    pk: String(u.pk), username: u.username, full_name: u.full_name || null,
-    profile_pic_url: u.profile_pic_url || null, is_verified: !!u.is_verified,
-    is_private: !!u.is_private, account_type: u.account_type || null,
-    has_highlight_reels: !!u.has_highlight_reels, friendship_status: u.friendship_status || null
-  };
-}`;
+// DM realtime listener: Instagram's own socket on the DM page. Keep-alives and acks
+// are a few bytes; message events observed at 229 to 6181 bytes.
+const REALTIME_SOCKET = "/ws/lightspeed";
+const REALTIME_EVENT_BYTES = 100;
+const REALTIME_DEBOUNCE_MS = 1500;
+const SOCKET_SILENCE_MS = 120000;
 
 /**
  * Social graph: follow / unfollow, direct messages and story interactions.
@@ -467,51 +445,68 @@ module.exports = {
     };
   },
 
-  /** Fetch inbox thread summaries (for activity detection + getInbox previews). @private */
+  /**
+   * Fetch inbox thread summaries (activity detection + getInbox). The inbox query
+   * carries no message bodies, so `latestItemId` is the thread's last-activity
+   * time (changes with every new message) and `latestItem` is filled by getInbox.
+   * Throws on failure instead of returning an empty inbox. @private
+   */
   async _fetchInboxSummary(page, limit) {
-    return page.evaluate(async ({ lim, trimSrc, utrimSrc }) => {
-      const __trim = eval("(" + trimSrc + ")");
-      const __utrim = eval("(" + utrimSrc + ")");
-      const r = await fetch(`/api/v1/direct_v2/inbox/?persistentBadging=true&limit=${lim}`,
-        { headers: { "x-ig-app-id": "936619743392459" }, credentials: "include" });
-      if (!r.ok) return [];
-      const j = await r.json();
-      return ((j.inbox && j.inbox.threads) || []).map(t => ({
-        threadId: t.thread_id,
-        threadTitle: t.thread_title || null,
-        users: (t.users || []).map(__utrim),
-        lastSeenAt: t.last_seen_at || {},
-        latestItemId: (t.items && t.items[0] && t.items[0].item_id) || null,
-        latestItem: (t.items && t.items[0]) ? __trim(t.items[0]) : null,
-      }));
-    }, { lim: limit, trimSrc: RAW_TRIM, utrimSrc: USER_TRIM });
-  },
-
-  /** Fetch a thread's full message history (trimmed raw items + users). @private */
-  async _fetchThreadRaw(page, threadId, limit) {
-    return page.evaluate(async ({ tid, lim, trimSrc, utrimSrc }) => {
-      const __trim = eval("(" + trimSrc + ")");
-      const __utrim = eval("(" + utrimSrc + ")");
-      const r = await fetch(`/api/v1/direct_v2/threads/${encodeURIComponent(tid)}/?limit=${lim}`,
-        { headers: { "x-ig-app-id": "936619743392459" }, credentials: "include" });
-      if (!r.ok) return null;
-      const j = await r.json();
-      const th = j.thread;
-      if (!th) return null;
-      return {
-        users: (th.users || []).map(__utrim),
-        lastSeenAt: th.last_seen_at || {},
-        rawItems: (th.items || []).map(__trim),
-      };
-    }, { tid: threadId, lim: limit, trimSrc: RAW_TRIM, utrimSrc: USER_TRIM });
+    const box = (await this._directQuery(page, "inbox")).get_slide_mailbox_for_iris_subscription;
+    const edges = (box && box.threads_by_folder && box.threads_by_folder.edges) || [];
+    return edges.slice(0, limit)
+      .map(e => e.node && (e.node.as_ig_direct_thread || e.node))
+      .filter(t => t && t.thread_key)
+      .map(t => {
+        const th = this._mapDirectThread(t);
+        return {
+          threadId: th.threadId,
+          threadTitle: th.threadTitle,
+          users: th.users,
+          lastSeenAt: th.lastSeenAt,
+          latestItemId: t.last_activity_timestamp_ms ? String(t.last_activity_timestamp_ms) : null,
+          latestItem: null,
+        };
+      });
   },
 
   /**
-   * Start polling the DM inbox and emit events for new messages. Burst-safe: the
-   * inbox only previews ~2 items/thread, so when a thread shows new activity the
-   * full thread is fetched and **every** new message is processed (none dropped).
+   * Fetch a thread's recent messages (trimmed raw items + users). `threadId` is
+   * the thread key used in /direct/t/{id}/ URLs. @private
+   */
+  async _fetchThreadRaw(page, threadId, limit) {
+    const data = await this._directQuery(page, "thread", { thread_fbid: String(threadId) });
+    const t = data.get_slide_thread_nullable && data.get_slide_thread_nullable.as_ig_direct_thread;
+    if (!t) return null;
+    const th = this._mapDirectThread(t);
+    return {
+      users: th.users,
+      lastSeenAt: th.lastSeenAt,
+      rawItems: ((t.slide_messages && t.slide_messages.edges) || [])
+        .map(e => this._mapDirectMessage(e.node, th.ctx))
+        .filter(Boolean)
+        .slice(0, limit),
+    };
+  },
+
+  /**
+   * Listen for new DMs and emit events for them. Burst-safe: when a thread shows
+   * new activity the thread is read and **every** new message is processed.
    *
-   * Two events fire per poll:
+   * Two triggers:
+   *   - `mode: 'realtime'` (default): a background tab stays on the DM page and
+   *     listens to Instagram's own realtime socket (the one that updates the unread
+   *     count); an event there triggers one read. No periodic requests, apart from
+   *     a safety check every `fullInterval` (default 5 min). If the socket goes
+   *     quiet (it normally sends a keep-alive every ~10 s) the page is reopened.
+   *   - `mode: 'poll'`: every `interval` the cheap unread badge is read; the inbox
+   *     is only queried when it moves, and at least every `fullInterval` (1 min).
+   *
+   * Failures are not silent: `messageListenerError` ({ error, failures }) fires on
+   * the first failure and every 30th in a row, `messageListenerRecovered` when it
+   * works again; `getMessageListenerStatus()` returns the latest state.
+   *
+   * Two events fire per read:
    *   - `messageReceived` — once per new message (in order)
    *   - `userMessages`     — once per thread/person, with all of that thread's new
    *                          messages batched: { threadId, threadTitle, from,
@@ -526,8 +521,11 @@ module.exports = {
    * `enrichSender`).
    *
    * @param {object} [options]
-   * @param {number}  [options.interval=6000]      - poll period (ms)
-   * @param {number}  [options.limit=20]           - threads to scan per poll
+   * @param {string}  [options.mode='realtime']    - 'realtime' or 'poll'
+   * @param {number}  [options.interval=6000]      - poll period (ms, poll mode)
+   * @param {number}  [options.fullInterval]       - max time between inbox reads (ms;
+   *                                                 realtime 300000, poll 60000)
+   * @param {number}  [options.limit=20]           - threads to scan per read
    * @param {number}  [options.threadLimit=25]     - messages fetched per active thread
    * @param {boolean} [options.includeSelf=false]  - also emit your own messages
    * @param {boolean} [options.emitExisting=false] - emit the current backlog on start
@@ -537,7 +535,9 @@ module.exports = {
     this._ensureReady();
     if (this._msgTimer) return this; // already running
 
+    const mode = options.mode === "poll" ? "poll" : "realtime";
     const interval = options.interval || 6000;
+    const fullInterval = options.fullInterval || (mode === "poll" ? 60000 : 300000);
     const limit = options.limit || 20;
     const threadLimit = options.threadLimit || 25;
     const includeSelf = !!options.includeSelf;
@@ -547,86 +547,166 @@ module.exports = {
     this._msgSeen = new Set();
     this._threadLatest = {};
     this._msgSinceTs = emitExisting ? 0 : Date.now();
+    this._msgStatus = { mode, ok: null, at: null, error: null, failures: 0, threads: null, lastEventAt: null };
     this._msgPage = await this.context.newPage();
-    await this._msgPage.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" }).catch(() => {});
 
     let seeded = false;
-    const poll = async () => {
-      if (this._msgPolling || !this._msgPage) return;
-      this._msgPolling = true;
-      try {
-        const summaries = await this._fetchInboxSummary(this._msgPage, limit);
+    let lastRead = 0;
+    let rerun = false;
 
-        // First poll with default options: remember each thread's latest item so
-        // only genuinely new activity triggers a (deep) fetch — no startup storm.
-        if (!seeded && !emitExisting) {
-          for (const s of summaries) if (s.latestItemId) this._threadLatest[s.threadId] = s.latestItemId;
-          this._msgSinceTs = Date.now();
-          seeded = true;
-          return;
-        }
+    // Read the inbox once: threads with new activity are read and their new
+    // messages emitted. The activity is marked handled only after the thread read.
+    const scan = async () => {
+      const summaries = await this._fetchInboxSummary(this._msgPage, limit);
+
+      // First read with default options: remember each thread's latest activity
+      // so only genuinely new activity triggers a thread read (no startup storm).
+      if (!seeded && !emitExisting) {
+        for (const s of summaries) if (s.latestItemId) this._threadLatest[s.threadId] = s.latestItemId;
+        this._msgSinceTs = Date.now();
         seeded = true;
+        return summaries;
+      }
+      seeded = true;
 
-        for (const s of summaries) {
-          if (!s.latestItemId) continue;
-          if (this._threadLatest[s.threadId] === s.latestItemId) continue; // no change
-          this._threadLatest[s.threadId] = s.latestItemId;
+      for (const s of summaries) {
+        if (!s.latestItemId) continue;
+        if (this._threadLatest[s.threadId] === s.latestItemId) continue; // no change
 
-          // New activity → fetch the full thread so no burst message is missed.
-          const raw = await this._fetchThreadRaw(this._msgPage, s.threadId, threadLimit);
-          if (!raw) continue;
-          const umap = {};
-          raw.users.forEach(u => { umap[u.pk] = u; });
+        const raw = await this._fetchThreadRaw(this._msgPage, s.threadId, threadLimit);
+        this._threadLatest[s.threadId] = s.latestItemId;
+        if (!raw) continue;
+        const umap = {};
+        raw.users.forEach(u => { umap[u.pk] = u; });
 
-          const newMsgs = [];
-          for (const ri of raw.rawItems) {
-            if (this._msgSeen.has(ri.itemId)) continue;
-            this._msgSeen.add(ri.itemId);
-            const tsMs = Math.round((ri.ts || 0) / 1000);
-            if (!emitExisting && tsMs <= this._msgSinceTs) continue; // pre-start history
-            const msg = this._normalizeItem(ri, umap);
-            msg.threadId = s.threadId;
-            msg.threadTitle = s.threadTitle;
-            const ls = raw.lastSeenAt[ri.userId];
-            msg.sender = umap[ri.userId] ? this._buildSender(umap[ri.userId], ls && ls.timestamp) : null;
-            if (msg.fromSelf && !includeSelf) continue;
-            newMsgs.push(msg);
-          }
-          if (!newMsgs.length) continue;
-          newMsgs.sort((a, b) => a.timestamp - b.timestamp);
-
-          if (enrichSender) {
-            const seen = {};
-            for (const m of newMsgs) {
-              if (!m.sender || seen[m.fromId]) continue;
-              await this._enrichSender(m.sender, m.fromId).catch(() => {});
-              seen[m.fromId] = m.sender;
-            }
-            // share the enriched object with same-sender messages in this batch
-            for (const m of newMsgs) if (m.sender && seen[m.fromId]) Object.assign(m.sender, seen[m.fromId]);
-          }
-
-          for (const m of newMsgs) this.emit("messageReceived", m);
-
-          const primary = (raw.users || []).find(u => String(u.pk) === String(newMsgs[0].fromId)) || raw.users[0];
-          const pls = primary && raw.lastSeenAt[primary.pk];
-          this.emit("userMessages", {
-            threadId: s.threadId,
-            threadTitle: s.threadTitle,
-            from: primary ? primary.username : s.threadTitle,
-            fromId: primary ? primary.pk : (newMsgs[0] && newMsgs[0].fromId),
-            sender: primary ? this._buildSender(primary, pls && pls.timestamp) : (newMsgs[0] && newMsgs[0].sender),
-            messages: newMsgs,
-          });
+        const newMsgs = [];
+        for (const ri of raw.rawItems) {
+          if (this._msgSeen.has(ri.itemId)) continue;
+          this._msgSeen.add(ri.itemId);
+          const tsMs = Math.round((ri.ts || 0) / 1000);
+          if (!emitExisting && tsMs <= this._msgSinceTs) continue; // pre-start history
+          const msg = this._normalizeItem(ri, umap);
+          msg.threadId = s.threadId;
+          msg.threadTitle = s.threadTitle;
+          const ls = raw.lastSeenAt[ri.userId];
+          msg.sender = umap[ri.userId] ? this._buildSender(umap[ri.userId], ls && ls.timestamp) : null;
+          if (msg.fromSelf && !includeSelf) continue;
+          newMsgs.push(msg);
         }
-      } catch (_) { /* transient (navigation / network) — retry next tick */ }
-      finally { this._msgPolling = false; }
+        if (!newMsgs.length) continue;
+        newMsgs.sort((a, b) => a.timestamp - b.timestamp);
+
+        if (enrichSender) {
+          const seen = {};
+          for (const m of newMsgs) {
+            if (!m.sender || seen[m.fromId]) continue;
+            await this._enrichSender(m.sender, m.fromId).catch(() => {});
+            seen[m.fromId] = m.sender;
+          }
+          // share the enriched object with same-sender messages in this batch
+          for (const m of newMsgs) if (m.sender && seen[m.fromId]) Object.assign(m.sender, seen[m.fromId]);
+        }
+
+        for (const m of newMsgs) this.emit("messageReceived", m);
+
+        const primary = (raw.users || []).find(u => String(u.pk) === String(newMsgs[0].fromId)) || raw.users[0];
+        const pls = primary && raw.lastSeenAt[primary.pk];
+        this.emit("userMessages", {
+          threadId: s.threadId,
+          threadTitle: s.threadTitle,
+          from: primary ? primary.username : s.threadTitle,
+          fromId: primary ? primary.pk : (newMsgs[0] && newMsgs[0].fromId),
+          sender: primary ? this._buildSender(primary, pls && pls.timestamp) : (newMsgs[0] && newMsgs[0].sender),
+          messages: newMsgs,
+        });
+      }
+      return summaries;
     };
 
-    await poll();                          // seed (or emit backlog with emitExisting)
-    this._msgTimer = setInterval(poll, interval);
-    this.emit("messageListenerStarted", { interval });
+    // Never two reads at once; a trigger that arrives during a read schedules one
+    // more, so a message landing mid-read is not left for the safety check.
+    const read = async () => {
+      if (!this._msgPage) return;
+      if (this._msgPolling) { rerun = true; return; }
+      this._msgPolling = true;
+      try {
+        do {
+          rerun = false;
+          lastRead = Date.now();
+          try { this._msgReadSucceeded(await scan()); }
+          catch (err) { this._msgReadFailed(err); }
+        } while (rerun && this._msgPage);
+      } finally { this._msgPolling = false; }
+    };
+
+    if (mode === "realtime") {
+      this._msgSocketAt = Date.now();
+      this._msgPage.on("websocket", ws => {
+        if (!ws.url().includes(REALTIME_SOCKET)) return;
+        this._msgSocketAt = Date.now();
+        ws.on("framereceived", frame => {
+          this._msgSocketAt = Date.now();
+          // Keep-alives and acks are a few bytes; message events are hundreds.
+          if (((frame.payload && frame.payload.length) || 0) < REALTIME_EVENT_BYTES) return;
+          this._msgStatus.lastEventAt = new Date().toISOString();
+          clearTimeout(this._msgDebounce);
+          this._msgDebounce = setTimeout(read, REALTIME_DEBOUNCE_MS); // one read per burst
+        });
+      });
+      // Opens the DM page: its own queries become the templates, and it stays open.
+      await this._learnDirectQueries(this._msgPage, { returnTo: DIRECT_INBOX_URL }).catch(err => this._msgReadFailed(err));
+      await read(); // seed (or emit backlog with emitExisting)
+      this._msgTimer = setInterval(async () => {
+        if (!this._msgPage) return;
+        if (Date.now() - this._msgSocketAt > SOCKET_SILENCE_MS) {
+          this._msgSocketAt = Date.now();
+          await this._msgPage.goto(DIRECT_INBOX_URL, { waitUntil: "domcontentloaded" }).catch(() => {});
+          this.emit("messageListenerReconnected", { at: new Date().toISOString() });
+          await read();
+        } else if (Date.now() - lastRead >= fullInterval) {
+          await read();
+        }
+      }, 30000);
+    } else {
+      await this._msgPage.goto(LIGHT_PAGE_URL, { waitUntil: "domcontentloaded" }).catch(() => {});
+      await read(); // seed (or emit backlog with emitExisting)
+      let lastBadge = null;
+      this._msgTimer = setInterval(async () => {
+        if (this._msgPolling || !this._msgPage) return;
+        const badge = await this._directBadge(this._msgPage).catch(() => null);
+        if (badge && badge === lastBadge && Date.now() - lastRead < fullInterval) return;
+        await read();
+        if (this._msgStatus.ok) lastBadge = badge;
+      }, interval);
+    }
+    this.emit("messageListenerStarted", { mode, interval: mode === "poll" ? interval : null });
     return this;
+  },
+
+  /** Record a successful read (and announce recovery after failures). @private */
+  _msgReadSucceeded(summaries) {
+    const st = this._msgStatus;
+    const recovered = st.failures > 0;
+    Object.assign(st, { ok: true, at: new Date().toISOString(), error: null, failures: 0, threads: summaries.length });
+    if (recovered) this.emit("messageListenerRecovered", { threads: summaries.length });
+  },
+
+  /** Record a failed read; reported, because a silent failure looks like an empty inbox. @private */
+  _msgReadFailed(err) {
+    const st = this._msgStatus;
+    Object.assign(st, { ok: false, at: new Date().toISOString(), error: err.message, failures: st.failures + 1 });
+    if (st.failures === 1 || st.failures % 30 === 0) {
+      this.emit("messageListenerError", { error: err.message, failures: st.failures });
+    }
+  },
+
+  /**
+   * State of the DM listener: { mode, ok, at, error, failures, threads,
+   * lastEventAt }; `ok` is null before the first read; null overall if the
+   * listener is not running.
+   */
+  getMessageListenerStatus() {
+    return this._msgTimer && this._msgStatus ? { ...this._msgStatus } : null;
   },
 
   /**
@@ -676,6 +756,7 @@ module.exports = {
   /** Stop the DM message listener and close its background tab. */
   async stopMessageListener() {
     if (this._msgTimer) { clearInterval(this._msgTimer); this._msgTimer = null; }
+    clearTimeout(this._msgDebounce);
     if (this._msgPage) { await this._msgPage.close().catch(() => {}); this._msgPage = null; }
     this._msgPolling = false;
     this.emit("messageListenerStopped");

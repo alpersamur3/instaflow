@@ -180,7 +180,7 @@ Scrape the top posts under a hashtag.
 List DM threads, each with its `lastMessage` (type, text/media, `sentAt`, sender).
 
 #### `bot.getMessages(threadId, count?)` → `{ messages }`
-Read messages in a thread (via the thread API). Each message is fully normalized — `{ itemId, from, fromId, fromSelf, type, text, media, repliedTo, timestamp, sentAt, sender }` — so you get the **date-time** (`sentAt`) and the quoted message (`repliedTo`) too.
+Read messages in a thread (over Instagram's web GraphQL). Each message is fully normalized (`{ itemId, from, fromId, fromSelf, type, text, media, repliedTo, timestamp, sentAt, sender }`), so you get the **date-time** (`sentAt`) and the quoted message (`repliedTo`) too.
 
 ---
 
@@ -343,12 +343,19 @@ Return the current session cookies in Playwright format — handy for exporting 
 
 ## 📨 Real-time DM Listener
 
-Poll the DM inbox and react to incoming messages as they arrive. **Burst-safe:**
-the inbox only previews ~2 items per thread, so when a thread shows new activity
-the full thread is fetched and **every** new message is delivered — none are
-dropped even if several arrive between polls.
+React to incoming messages as they arrive. By default the listener is
+**event-driven**: a background tab stays on the DM page and listens to
+Instagram's own realtime socket (the one that updates the unread count), and
+an event there triggers one read of the inbox. There are no periodic requests
+apart from a safety check every 5 minutes. **Burst-safe:** when a thread shows
+new activity the thread is read and **every** new message is delivered; none
+are dropped even if several arrive at once.
 
-Two events fire per poll — use whichever you like:
+DMs are read over Instagram's web GraphQL (the old `/api/v1/direct_v2/` REST
+endpoints are gone). Query ids and tokens are learned from the DM page itself
+and re-learned when they rotate, so nothing is hard-coded.
+
+Two events fire per read; use whichever you like:
 
 | Event | Fires | Payload |
 |---|---|---|
@@ -360,7 +367,12 @@ So if Alper sends 3 messages and Mehmet sends 2 in one cycle, you get 5
 Mehmet's 2).
 
 #### `bot.startMessageListener(options?)`
-Start polling. Options: `interval` (ms, default 6000), `limit` (threads per poll, default 20), `threadLimit` (messages fetched per active thread, default 25), `includeSelf` (default false), `emitExisting` (emit the current backlog on start, default false), `enrichSender` (add bio/follower counts/story status to `sender`, one extra request per new sender, default false).
+Start listening. Options: `mode` (`'realtime'`, the default, listens to Instagram's socket; `'poll'` reads the cheap unread badge every `interval` and the inbox only when it moves), `interval` (ms, poll mode, default 6000), `fullInterval` (max time between inbox reads, default 5 min realtime / 1 min poll), `limit` (threads per read, default 20), `threadLimit` (messages fetched per active thread, default 25), `includeSelf` (default false), `emitExisting` (emit the current backlog on start, default false), `enrichSender` (add bio/follower counts/story status to `sender`, one extra request per new sender, default false).
+
+Failures are reported, never swallowed: `messageListenerError` (`{ error, failures }`) fires on the first failed read and every 30th in a row, `messageListenerRecovered` when reads work again, and `messageListenerReconnected` when the DM page had to be reopened because the socket went quiet.
+
+#### `bot.getMessageListenerStatus()` → `{ mode, ok, at, error, failures, threads, lastEventAt }`
+Latest listener state (`ok` is `null` before the first read); `null` when the listener is not running.
 
 #### `bot.stopMessageListener()`
 Stop polling and close the background tab.
@@ -381,7 +393,7 @@ bot.on('userMessages', ({ from, messages }) => {
   console.log(`@${from} sent ${messages.length} new message(s)`);
 });
 
-bot.on('ready', () => bot.startMessageListener({ interval: 5000 }));
+bot.on('ready', () => bot.startMessageListener());
 bot.init();
 ```
 
@@ -403,14 +415,14 @@ bot.init();
     username, fullName, avatar /* profile pic */, isVerified, isPrivate,
     accountType, hasHighlights,
     friendship: { following, followedBy, isBestie, muting, blocking, restricted },
-    lastActiveAt,    // ms — last seen in this thread (web has no live "online" flag)
+    lastActiveAt,    // ms, when they last read this thread (read receipt; web has no live "online" flag)
     // with enrichSender: true, also:
     bio, followers, following, posts, externalUrl, hasActiveStory, storyCount,
   },
 }
 ```
 
-> Polling runs on a dedicated background tab, so it never disrupts your other actions. If your handler does heavy work (downloads, navigation), serialize it (e.g. a queue) to avoid overlapping page operations.
+> The listener runs on a dedicated background tab, so it never disrupts your other actions. If your handler does heavy work (downloads, navigation), serialize it (e.g. a queue) to avoid overlapping page operations.
 
 ---
 
