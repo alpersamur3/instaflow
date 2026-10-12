@@ -25,7 +25,7 @@ API anahtarı yok. OAuth yok. Sadece gerçek bir tarayıcı oturumu, insan benze
 | **Sosyal** | Takip et, takipten çık, DM gönder, DM mesajlarına tepki ver, hikaye görüntüle & tepki ver |
 | **Kazıma (Scraping)** | Profil istatistikleri, gönderi istatistikleri, yorumlar, takipçi/takip edilen, arama, hashtag gönderileri, gelen kutusu |
 | **Reels & Gönderiler** | Reels akışını kazı, reel/gönderi analizi — reel videosunu, ya da her carousel resmini + eklenen müziği indir — açıklama/beğeni/yorum ile |
-| **Gerçek Zamanlı** | DM mesaj dinleyici (`messageReceived`/`userMessages`), bahsetme/bildirim dinleyici (`mentioned`) |
+| **Gerçek Zamanlı** | DM mesaj dinleyici (`messageReceived`/`userMessages`/`messageRequest`), bahsetme/bildirim dinleyici (`mentioned`) |
 | **Oturum** | Ham çerezleri dışa aktar (ör. `yt-dlp` için) |
 | **Güvenlik** | Yerleşik hız sınırlayıcı, insan benzeri gecikmeler, tespit önleyici gizlilik, kalıcı oturumlar |
 
@@ -182,6 +182,9 @@ DM konularını listeler; her biri `lastMessage` ile (tür, metin/medya, `sentAt
 #### `bot.getMessages(threadId, count?)` → `{ messages }`
 Bir konudaki mesajları (Instagram web GraphQL'i üzerinden) okur. Her mesaj tam normalize (`{ itemId, from, fromId, fromSelf, type, text, media, repliedTo, timestamp, sentAt, sender }`), yani **tarih-saat** (`sentAt`) ve alıntılanan mesaj (`repliedTo`) de gelir.
 
+#### `bot.getMessageRequests(count?)` → `{ threads }`
+Bekleyen mesaj isteklerini (takip etmediğin birinin ilk mesajı) `messages` ile birlikte okur. Instagram'ın Gizli İstekler'e ayırdıkları dahil değildir.
+
 ---
 
 ### Okuma — Reels
@@ -323,6 +326,9 @@ Bir kullanıcının aktif hikayesine emoji ile tepki verir.
 #### `bot.reactToMessage(threadId, target?, emoji?)` → `Result`
 Bir DM mesajına emoji ile tepki verir (hızlı set: ❤️ 😂 😮 😢 😡 👍; varsayılan ❤️). `target` mesajın **metni**, bir `{ text }` veya bir `messageReceived` mesaj nesnesi olabilir; vermezsen thread'deki son gelen metin mesajına tepki verir. Listener ile doğal uyum:
 
+#### `bot.acceptMessageRequest(threadId)` → `Result`
+Bekleyen bir mesaj isteğini kabul eder. Kabul edilene kadar sohbette sadece Engelle / Sil / Kabul et vardır ve cevap yazılamaz. Zaten kabul edilmiş bir sohbette çağrılırsa `alreadyAccepted: true` ile başarılı döner.
+
 ```js
 bot.on('messageReceived', (msg) => {
   if (msg.type === 'reel') bot.reactToMessage(msg.threadId, msg, '😂');
@@ -372,6 +378,8 @@ Hatalar yutulmaz, bildirilir: `messageListenerError` (`{ error, failures }`) ilk
 
 #### `bot.getMessageListenerStatus()` → `{ mode, ok, at, error, failures, threads, lastEventAt }`
 Dinleyicinin son durumu (`ok` ilk okumadan önce `null`); dinleyici çalışmıyorsa `null`.
+
+Mesaj istekleri her okumanın parçasıdır (`requests: false` ile kapatılır): bekleyen her istek bir kez `messageRequest` olarak, `userMessages` ile aynı yükle yayılır; dinleyici başlamadan önce gelmiş istekler de dahil. Cevap yazmadan önce `acceptMessageRequest(threadId)` ile kabul et; sonra sohbet gelen kutusuna geçer ve mesajları tekrar yayılmaz.
 
 #### `bot.stopMessageListener()`
 Dinlemeyi durdurur ve arka plan sekmesini kapatır.

@@ -25,7 +25,7 @@ No API key. No OAuth. Just a real browser session, human-like behaviour, and a c
 | **Social** | Follow, unfollow, send DM, react to DM messages, view & react to story |
 | **Scraping** | Profile stats, post stats, comments, followers/following, search, hashtag posts, inbox |
 | **Reels & Posts** | Scrape the reels feed, reel/post analysis — download reel video, or every carousel image + the attached music — with caption/likes/comments |
-| **Realtime** | DM message listener (`messageReceived`/`userMessages`), mention/notification listener (`mentioned`) |
+| **Realtime** | DM message listener (`messageReceived`/`userMessages`/`messageRequest`), mention/notification listener (`mentioned`) |
 | **Session** | Export raw cookies (e.g. for `yt-dlp`) |
 | **Safety** | Built-in rate limiter, human-like delays, anti-detection stealth, persistent sessions |
 
@@ -182,6 +182,9 @@ List DM threads, each with its `lastMessage` (type, text/media, `sentAt`, sender
 #### `bot.getMessages(threadId, count?)` → `{ messages }`
 Read messages in a thread (over Instagram's web GraphQL). Each message is fully normalized (`{ itemId, from, fromId, fromSelf, type, text, media, repliedTo, timestamp, sentAt, sender }`), so you get the **date-time** (`sentAt`) and the quoted message (`repliedTo`) too.
 
+#### `bot.getMessageRequests(count?)` → `{ threads }`
+Pending message requests (someone you don't follow writing first), each with its `messages`. Requests filtered into Instagram's Hidden Requests are not included.
+
 ---
 
 ### Read — Reels
@@ -323,6 +326,9 @@ React to a user's active story with an emoji.
 #### `bot.reactToMessage(threadId, target?, emoji?)` → `Result`
 React to a DM message with an emoji (quick set: ❤️ 😂 😮 😢 😡 👍; default ❤️). `target` is the message **text**, a `{ text }`, or a `messageReceived` message object; omit it to react to the last incoming text message. Pairs naturally with the listener:
 
+#### `bot.acceptMessageRequest(threadId)` → `Result`
+Accept a pending message request. Until then the thread offers only Block / Delete / Accept and you can't reply. Calling it on an already accepted thread succeeds with `alreadyAccepted: true`.
+
 ```js
 bot.on('messageReceived', (msg) => {
   if (msg.type === 'reel') bot.reactToMessage(msg.threadId, msg, '😂');
@@ -373,6 +379,8 @@ Failures are reported, never swallowed: `messageListenerError` (`{ error, failur
 
 #### `bot.getMessageListenerStatus()` → `{ mode, ok, at, error, failures, threads, lastEventAt }`
 Latest listener state (`ok` is `null` before the first read); `null` when the listener is not running.
+
+Message requests are part of every read (`requests: false` turns them off): each pending request is emitted once as `messageRequest`, with the same payload as `userMessages`, including requests that arrived before the listener started. Accept it with `acceptMessageRequest(threadId)` before replying; after that the thread is in the inbox and its messages are not emitted again.
 
 #### `bot.stopMessageListener()`
 Stop polling and close the background tab.

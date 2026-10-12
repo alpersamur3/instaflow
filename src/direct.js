@@ -9,7 +9,12 @@ const { DIRECT_INBOX_URL: INBOX_URL, LIGHT_PAGE_URL: LIGHT_PAGE } = require("./c
 // the DM page is opened once, its own requests are captured as templates and
 // replayed with fetch from a same-origin page. A failed replay re-learns the
 // templates from the page.
-const DIRECT_QUERIES = { inbox: "PolarisDirectInboxQuery", thread: "IGDThreadDetailQuery" };
+const DIRECT_QUERIES = {
+  inbox: "PolarisDirectInboxQuery",
+  thread: "IGDThreadDetailQuery",
+  requests: "PolarisDirectMessageRequestQuery", // message requests (system_folder PENDING)
+};
+const REQUESTS_URL = "https://www.instagram.com/direct/requests/";
 const KEEP_HEADER = /^(x-|content-type$|accept$)/i;
 const RELEARN_COOLDOWN_MS = 60000;
 
@@ -74,6 +79,29 @@ module.exports = {
     return this._directTpl;
   },
 
+  /** Capture the message-requests query template from the requests page. @private */
+  async _learnRequestsQuery(page, { returnTo = LIGHT_PAGE } = {}) {
+    let found = null;
+    const onRequest = req => {
+      if (found || req.headers()["x-fb-friendly-name"] !== DIRECT_QUERIES.requests) return;
+      const headers = {};
+      for (const [key, value] of Object.entries(req.headers())) if (KEEP_HEADER.test(key)) headers[key] = value;
+      found = { url: req.url(), headers, body: req.postData() || "" };
+    };
+    page.on("request", onRequest);
+    try {
+      await page.goto(REQUESTS_URL, { waitUntil: "domcontentloaded" });
+      if (!(await waitFor(() => found, 20000))) {
+        throw new Error("Instagram message requests query was not observed (the requests page changed)");
+      }
+      this._directTpl = { ...(this._directTpl || {}), requests: found };
+    } finally {
+      page.off("request", onRequest);
+      if (page.url() !== returnTo) await page.goto(returnTo, { waitUntil: "domcontentloaded" }).catch(() => {});
+    }
+    return this._directTpl;
+  },
+
   /** Replay a captured template with patched variables; returns the GraphQL `data`. @private */
   async _replayDirect(page, kind, patch = null) {
     const tpl = this._directTpl && this._directTpl[kind];
@@ -103,9 +131,12 @@ module.exports = {
     }
     // A page that lives on the DM page (realtime listener) goes back there after re-learning.
     const returnTo = page.url().startsWith(INBOX_URL) ? INBOX_URL : LIGHT_PAGE;
+    const learn = () => (kind === "requests"
+      ? this._learnRequestsQuery(page, { returnTo })
+      : this._learnDirectQueries(page, { returnTo }));
     if (!this._directTpl || !this._directTpl[kind]) {
       this._directRelearnAt = Date.now();
-      await this._learnDirectQueries(page, { returnTo });
+      await learn();
       return this._replayDirect(page, kind, patch);
     }
     try {
@@ -113,7 +144,7 @@ module.exports = {
     } catch (err) {
       if (this._directRelearnAt && Date.now() - this._directRelearnAt < RELEARN_COOLDOWN_MS) throw err;
       this._directRelearnAt = Date.now();
-      await this._learnDirectQueries(page, { returnTo });
+      await learn();
       return this._replayDirect(page, kind, patch);
     }
   },

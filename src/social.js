@@ -6,6 +6,13 @@ const { DIRECT_INBOX_URL, LIGHT_PAGE_URL } = require("./constants");
 
 // DM realtime listener: Instagram's own socket on the DM page. Keep-alives and acks
 // are a few bytes; message events observed at 229 to 6181 bytes.
+// DM message box: a contenteditable textbox (newer) or a textarea (older).
+const DM_COMPOSER =
+  'div[role="textbox"][contenteditable="true"], ' +
+  'textarea[placeholder*="Message" i], textarea[placeholder*="Mesaj" i], ' +
+  'div[aria-label*="Message" i][contenteditable="true"], ' +
+  'div[aria-label*="Mesaj" i][contenteditable="true"]';
+
 const REALTIME_SOCKET = "/ws/lightspeed";
 const REALTIME_EVENT_BYTES = 100;
 const REALTIME_DEBOUNCE_MS = 1500;
@@ -203,11 +210,7 @@ module.exports = {
 
       // The chat opens inline (overlay) or at /direct/t/…; the input is a
       // contenteditable textbox (newer) or a textarea (older).
-      const dmAreaSelector =
-        'div[role="textbox"][contenteditable="true"], ' +
-        'textarea[placeholder*="Message" i], textarea[placeholder*="Mesaj" i], ' +
-        'div[aria-label*="Message" i][contenteditable="true"], ' +
-        'div[aria-label*="Mesaj" i][contenteditable="true"]';
+      const dmAreaSelector = DM_COMPOSER;
       await this.page.waitForSelector(dmAreaSelector, { state: "visible", timeout: 15000 });
 
       const dmArea = this.page.locator(dmAreaSelector).first();
@@ -232,6 +235,59 @@ module.exports = {
       this.emit("dmFailed", { to: normalizedUser, error: err.message });
       throw err;
     }
+  },
+
+  /**
+   * Accept a pending message request so you can reply (until then the thread has
+   * only Block / Delete / Accept and no message box). Safe to call on a thread
+   * that is already accepted.
+   * @param {string} threadId - thread key, as in /direct/t/{id}/ (e.g. from a `messageRequest` event)
+   */
+  async acceptMessageRequest(threadId) {
+    this._ensureReady();
+    try {
+      await this.page.goto(`https://www.instagram.com/direct/t/${threadId}/`, { waitUntil: "domcontentloaded" });
+      await delay(3500);
+      await this._dismissDialogs();
+
+      const button = text => `div[role="button"]:text-is("${text}"), button:text-is("${text}")`;
+      const accept = this.page.locator([button("Accept"), button("Kabul et")].join(", ")).first();
+      if (!(await accept.count())) {
+        if (await this.page.locator(DM_COMPOSER).count()) {
+          return { success: true, threadId, alreadyAccepted: true };
+        }
+        const labels = await this._visibleButtonLabels();
+        throw new Error(`acceptMessageRequest: no Accept button in thread ${threadId} (buttons: ${labels.join(", ") || "none"})`);
+      }
+      await accept.click({ force: true });
+      await delay(2000);
+
+      // Some accounts are asked where to move the conversation; Primary keeps it
+      // with the other chats.
+      const inDialog = text => `div[role="dialog"] div[role="button"]:text-is("${text}"), div[role="dialog"] button:text-is("${text}")`;
+      const choice = this.page.locator(["Primary", "Birincil", "Accept", "Kabul et"].map(inDialog).join(", ")).first();
+      if (await choice.count()) { await choice.click({ force: true }).catch(() => {}); await delay(1500); }
+
+      await this.page.waitForSelector(DM_COMPOSER, { state: "visible", timeout: 12000 }).catch(async () => {
+        const labels = await this._visibleButtonLabels();
+        throw new Error(`acceptMessageRequest: the request did not open for replies (buttons: ${labels.join(", ") || "none"})`);
+      });
+
+      const result = { success: true, threadId, timestamp: new Date().toISOString() };
+      this.emit("messageRequestAccepted", result);
+      return result;
+    } catch (err) {
+      this.emit("messageRequestAcceptFailed", { threadId, error: err.message });
+      throw err;
+    }
+  },
+
+  /** Short labels of the visible buttons (for error messages when a UI step fails). @private */
+  async _visibleButtonLabels() {
+    return this.page.evaluate(() => [...new Set([...document.querySelectorAll('[role="button"], button')]
+      .filter(b => b.offsetParent !== null)
+      .map(b => (b.innerText || b.getAttribute("aria-label") || "").trim())
+      .filter(t => t && t.length < 40))].slice(0, 20)).catch(() => []);
   },
 
   /** Open and view a user's current story (counts as a view). */
@@ -452,7 +508,20 @@ module.exports = {
    * Throws on failure instead of returning an empty inbox. @private
    */
   async _fetchInboxSummary(page, limit) {
-    const box = (await this._directQuery(page, "inbox")).get_slide_mailbox_for_iris_subscription;
+    return this._summarizeMailbox((await this._directQuery(page, "inbox")).get_slide_mailbox_for_iris_subscription, limit);
+  },
+
+  /**
+   * Fetch pending message requests (people you don't follow writing for the first
+   * time), same summary shape as _fetchInboxSummary. Hidden requests (Instagram's
+   * spam filter) are left out. @private
+   */
+  async _fetchRequestSummary(page, limit) {
+    return this._summarizeMailbox((await this._directQuery(page, "requests")).get_slide_mailbox_for_iris_subscription, limit);
+  },
+
+  /** Mailbox (inbox or requests) → thread summaries. @private */
+  _summarizeMailbox(box, limit) {
     const edges = (box && box.threads_by_folder && box.threads_by_folder.edges) || [];
     return edges.slice(0, limit)
       .map(e => e.node && (e.node.as_ig_direct_thread || e.node))
@@ -506,6 +575,10 @@ module.exports = {
    * the first failure and every 30th in a row, `messageListenerRecovered` when it
    * works again; `getMessageListenerStatus()` returns the latest state.
    *
+   * Message requests (someone you don't follow writing first) arrive as
+   * `messageRequest` with the same payload as `userMessages`; reply only after
+   * acceptMessageRequest(threadId).
+   *
    * Two events fire per read:
    *   - `messageReceived` — once per new message (in order)
    *   - `userMessages`     — once per thread/person, with all of that thread's new
@@ -530,6 +603,7 @@ module.exports = {
    * @param {boolean} [options.includeSelf=false]  - also emit your own messages
    * @param {boolean} [options.emitExisting=false] - emit the current backlog on start
    * @param {boolean} [options.enrichSender=false] - add bio/followers/story to sender
+   * @param {boolean} [options.requests=true]      - also emit pending message requests
    */
   async startMessageListener(options = {}) {
     this._ensureReady();
@@ -543,9 +617,11 @@ module.exports = {
     const includeSelf = !!options.includeSelf;
     const emitExisting = !!options.emitExisting;
     const enrichSender = !!options.enrichSender;
+    const requests = options.requests !== false;
 
     this._msgSeen = new Set();
     this._threadLatest = {};
+    this._requestLatest = {};
     this._msgSinceTs = emitExisting ? 0 : Date.now();
     this._msgStatus = { mode, ok: null, at: null, error: null, failures: 0, threads: null, lastEventAt: null };
     this._msgPage = await this.context.newPage();
@@ -554,71 +630,87 @@ module.exports = {
     let lastRead = 0;
     let rerun = false;
 
+    // One thread with new activity → a batch of its new messages (normalized,
+    // oldest first), or null. `sinceTs` skips history from before the listener
+    // started (0 keeps all). Each item is emitted at most once (_msgSeen).
+    const collect = async (s, sinceTs) => {
+      const raw = await this._fetchThreadRaw(this._msgPage, s.threadId, threadLimit);
+      if (!raw) return null;
+      const umap = {};
+      raw.users.forEach(u => { umap[u.pk] = u; });
+
+      const newMsgs = [];
+      for (const ri of raw.rawItems) {
+        if (this._msgSeen.has(ri.itemId)) continue;
+        this._msgSeen.add(ri.itemId);
+        if (Math.round((ri.ts || 0) / 1000) <= sinceTs) continue;
+        const msg = this._normalizeItem(ri, umap);
+        msg.threadId = s.threadId;
+        msg.threadTitle = s.threadTitle;
+        const ls = raw.lastSeenAt[ri.userId];
+        msg.sender = umap[ri.userId] ? this._buildSender(umap[ri.userId], ls && ls.timestamp) : null;
+        if (msg.fromSelf && !includeSelf) continue;
+        newMsgs.push(msg);
+      }
+      if (!newMsgs.length) return null;
+      newMsgs.sort((a, b) => a.timestamp - b.timestamp);
+
+      if (enrichSender) {
+        const seen = {};
+        for (const m of newMsgs) {
+          if (!m.sender || seen[m.fromId]) continue;
+          await this._enrichSender(m.sender, m.fromId).catch(() => {});
+          seen[m.fromId] = m.sender;
+        }
+        // share the enriched object with same-sender messages in this batch
+        for (const m of newMsgs) if (m.sender && seen[m.fromId]) Object.assign(m.sender, seen[m.fromId]);
+      }
+
+      const primary = (raw.users || []).find(u => String(u.pk) === String(newMsgs[0].fromId)) || raw.users[0];
+      const pls = primary && raw.lastSeenAt[primary.pk];
+      return {
+        threadId: s.threadId,
+        threadTitle: s.threadTitle,
+        from: primary ? primary.username : s.threadTitle,
+        fromId: primary ? primary.pk : newMsgs[0].fromId,
+        sender: primary ? this._buildSender(primary, pls && pls.timestamp) : newMsgs[0].sender,
+        messages: newMsgs,
+      };
+    };
+
     // Read the inbox once: threads with new activity are read and their new
     // messages emitted. The activity is marked handled only after the thread read.
     const scan = async () => {
       const summaries = await this._fetchInboxSummary(this._msgPage, limit);
 
-      // First read with default options: remember each thread's latest activity
-      // so only genuinely new activity triggers a thread read (no startup storm).
       if (!seeded && !emitExisting) {
+        // First read with default options: remember each thread's latest activity
+        // so only genuinely new activity triggers a thread read (no startup storm).
         for (const s of summaries) if (s.latestItemId) this._threadLatest[s.threadId] = s.latestItemId;
         this._msgSinceTs = Date.now();
-        seeded = true;
-        return summaries;
+      } else {
+        for (const s of summaries) {
+          if (!s.latestItemId || this._threadLatest[s.threadId] === s.latestItemId) continue; // no change
+          const batch = await collect(s, emitExisting ? 0 : this._msgSinceTs);
+          this._threadLatest[s.threadId] = s.latestItemId;
+          if (!batch) continue;
+          for (const m of batch.messages) this.emit("messageReceived", m);
+          this.emit("userMessages", batch);
+        }
       }
       seeded = true;
 
-      for (const s of summaries) {
-        if (!s.latestItemId) continue;
-        if (this._threadLatest[s.threadId] === s.latestItemId) continue; // no change
-
-        const raw = await this._fetchThreadRaw(this._msgPage, s.threadId, threadLimit);
-        this._threadLatest[s.threadId] = s.latestItemId;
-        if (!raw) continue;
-        const umap = {};
-        raw.users.forEach(u => { umap[u.pk] = u; });
-
-        const newMsgs = [];
-        for (const ri of raw.rawItems) {
-          if (this._msgSeen.has(ri.itemId)) continue;
-          this._msgSeen.add(ri.itemId);
-          const tsMs = Math.round((ri.ts || 0) / 1000);
-          if (!emitExisting && tsMs <= this._msgSinceTs) continue; // pre-start history
-          const msg = this._normalizeItem(ri, umap);
-          msg.threadId = s.threadId;
-          msg.threadTitle = s.threadTitle;
-          const ls = raw.lastSeenAt[ri.userId];
-          msg.sender = umap[ri.userId] ? this._buildSender(umap[ri.userId], ls && ls.timestamp) : null;
-          if (msg.fromSelf && !includeSelf) continue;
-          newMsgs.push(msg);
+      if (requests) {
+        // Message requests are emitted once each, including ones that arrived
+        // before the listener started: until accepted or deleted they stay
+        // pending and the sender has no other way to reach you. Once accepted the
+        // thread moves to the inbox; its messages were already emitted here.
+        for (const s of await this._fetchRequestSummary(this._msgPage, limit)) {
+          if (!s.latestItemId || this._requestLatest[s.threadId] === s.latestItemId) continue;
+          const batch = await collect(s, 0);
+          this._requestLatest[s.threadId] = s.latestItemId;
+          if (batch) this.emit("messageRequest", batch);
         }
-        if (!newMsgs.length) continue;
-        newMsgs.sort((a, b) => a.timestamp - b.timestamp);
-
-        if (enrichSender) {
-          const seen = {};
-          for (const m of newMsgs) {
-            if (!m.sender || seen[m.fromId]) continue;
-            await this._enrichSender(m.sender, m.fromId).catch(() => {});
-            seen[m.fromId] = m.sender;
-          }
-          // share the enriched object with same-sender messages in this batch
-          for (const m of newMsgs) if (m.sender && seen[m.fromId]) Object.assign(m.sender, seen[m.fromId]);
-        }
-
-        for (const m of newMsgs) this.emit("messageReceived", m);
-
-        const primary = (raw.users || []).find(u => String(u.pk) === String(newMsgs[0].fromId)) || raw.users[0];
-        const pls = primary && raw.lastSeenAt[primary.pk];
-        this.emit("userMessages", {
-          threadId: s.threadId,
-          threadTitle: s.threadTitle,
-          from: primary ? primary.username : s.threadTitle,
-          fromId: primary ? primary.pk : (newMsgs[0] && newMsgs[0].fromId),
-          sender: primary ? this._buildSender(primary, pls && pls.timestamp) : (newMsgs[0] && newMsgs[0].sender),
-          messages: newMsgs,
-        });
       }
       return summaries;
     };

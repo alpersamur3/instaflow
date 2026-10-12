@@ -1141,6 +1141,33 @@ module.exports = {
   },
 
   /**
+   * Read pending message requests (people you don't follow writing first), each
+   * with its messages; same thread shape as getInbox plus `messages`. Accept one
+   * with acceptMessageRequest(threadId) before replying.
+   * @param {number} count
+   * @returns {Promise<{collected:number, threads:Array}>}
+   */
+  async getMessageRequests(count = 20) {
+    this._ensureReady();
+    const summaries = await this._fetchRequestSummary(this.page, count);
+    const threads = [];
+    for (const s of summaries) {
+      const raw = await this._fetchThreadRaw(this.page, s.threadId, 20).catch(() => null);
+      const users = (raw && raw.users.length) ? raw.users : (s.users || []);
+      const umap = {};
+      users.forEach(u => { umap[u.pk] = u; });
+      threads.push({
+        threadId: s.threadId,
+        title: s.threadTitle,
+        users: users.map(u => u.username),
+        url: `https://www.instagram.com/direct/t/${s.threadId}/`,
+        messages: raw ? raw.rawItems.map(ri => this._normalizeItem(ri, umap)).sort((a, b) => a.timestamp - b.timestamp) : [],
+      });
+    }
+    return { collected: threads.length, threads };
+  },
+
+  /**
    * Read recent messages in a specific DM thread via the thread API. Each message
    * is fully normalized: { itemId, from, fromId, fromSelf, type, text, media,
    * repliedTo, timestamp, sentAt, sender }.
