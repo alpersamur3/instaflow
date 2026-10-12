@@ -315,7 +315,10 @@ Scrape the top posts under a hashtag and like up to `count` of them (default 5),
 Follow / unfollow an account.
 
 #### `bot.sendDM(username, message)` → `DMResult`
-Send a direct message to a user.
+Send a direct message to a user. Line breaks in `message` stay inside one message.
+
+#### `bot.sendMessageInThread(threadId, message)` → `DMResult`
+Send a message inside an existing conversation, e.g. the `threadId` of a `userMessages` or `messageRequest` event. Goes straight to the thread instead of the profile's Message button, so it is the reliable way to reply. A message request must be accepted first.
 
 #### `bot.viewStory(username)` → `Result`
 Open and watch a user's currently-active story (registers as a view).
@@ -326,14 +329,14 @@ React to a user's active story with an emoji.
 #### `bot.reactToMessage(threadId, target?, emoji?)` → `Result`
 React to a DM message with an emoji (quick set: ❤️ 😂 😮 😢 😡 👍; default ❤️). `target` is the message **text**, a `{ text }`, or a `messageReceived` message object; omit it to react to the last incoming text message. Pairs naturally with the listener:
 
-#### `bot.acceptMessageRequest(threadId)` → `Result`
-Accept a pending message request. Until then the thread offers only Block / Delete / Accept and you can't reply. Calling it on an already accepted thread succeeds with `alreadyAccepted: true`.
-
 ```js
 bot.on('messageReceived', (msg) => {
   if (msg.type === 'reel') bot.reactToMessage(msg.threadId, msg, '😂');
 });
 ```
+
+#### `bot.acceptMessageRequest(threadId)` → `Result`
+Accept a pending message request. Until then the thread offers only Block / Delete / Accept and you can't reply. Calling it on an already accepted thread succeeds with `alreadyAccepted: true`.
 
 ---
 
@@ -373,7 +376,9 @@ So if Alper sends 3 messages and Mehmet sends 2 in one cycle, you get 5
 Mehmet's 2).
 
 #### `bot.startMessageListener(options?)`
-Start listening. Options: `mode` (`'realtime'`, the default, listens to Instagram's socket; `'poll'` reads the cheap unread badge every `interval` and the inbox only when it moves), `interval` (ms, poll mode, default 6000), `fullInterval` (max time between inbox reads, default 5 min realtime / 1 min poll), `limit` (threads per read, default 20), `threadLimit` (messages fetched per active thread, default 25), `includeSelf` (default false), `emitExisting` (emit the current backlog on start, default false), `enrichSender` (add bio/follower counts/story status to `sender`, one extra request per new sender, default false).
+Start listening. Options: `mode` (`'realtime'`, the default, listens to Instagram's socket; `'poll'` reads the cheap unread badge every `interval` and the inbox only when it moves), `interval` (ms, poll mode, default 6000), `fullInterval` (max time between inbox reads, default 5 min realtime / 1 min poll), `limit` (threads per read, default 20), `threadLimit` (messages fetched per active thread, default 25), `includeSelf` (default false), `emitExisting` (emit the current backlog on start, default false), `enrichSender` (add bio/follower counts/story status to `sender`, one extra request per new sender, default false), `since` (resume after a restart: messages newer than this time in ms are emitted on the first read instead of being treated as history; store the time of the last message you handled and pass it back).
+
+The socket can announce a message a moment before the inbox query shows it. If the read triggered by an event finds nothing new, the inbox is checked again after 4 and 12 seconds.
 
 Failures are reported, never swallowed: `messageListenerError` (`{ error, failures }`) fires on the first failed read and every 30th in a row, `messageListenerRecovered` when reads work again, and `messageListenerReconnected` when the DM page had to be reopened because the socket went quiet.
 

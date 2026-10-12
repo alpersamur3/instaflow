@@ -17,6 +17,7 @@ const REALTIME_SOCKET = "/ws/lightspeed";
 const REALTIME_EVENT_BYTES = 100;
 const REALTIME_DEBOUNCE_MS = 1500;
 const SOCKET_SILENCE_MS = 120000;
+const EVENT_FOLLOWUP_MS = [4000, 12000];
 
 /**
  * Social graph: follow / unfollow, direct messages and story interactions.
@@ -213,13 +214,7 @@ module.exports = {
       const dmAreaSelector = DM_COMPOSER;
       await this.page.waitForSelector(dmAreaSelector, { state: "visible", timeout: 15000 });
 
-      const dmArea = this.page.locator(dmAreaSelector).first();
-      await dmArea.click();
-      await delay(500);
-      await dmArea.type(text, { delay: 50 });
-      await delay(800);
-      await dmArea.press("Enter");
-      await delay(2500);
+      await this._typeAndSend(this.page.locator(dmAreaSelector).first(), text);
 
       const result = {
         success: true,
@@ -235,6 +230,50 @@ module.exports = {
       this.emit("dmFailed", { to: normalizedUser, error: err.message });
       throw err;
     }
+  },
+
+  /**
+   * Send a message inside an existing conversation (e.g. a `userMessages` /
+   * `messageRequest` thread). More reliable than sendDM's profile route when you
+   * already have the thread; a message request must be accepted first.
+   * @param {string} threadId - thread key, as in /direct/t/{id}/
+   * @param {string} text - message text (line breaks are kept)
+   */
+  async sendMessageInThread(threadId, text) {
+    this._ensureReady();
+    this._checkRateLimit("dm");
+    try {
+      await this.page.goto(`https://www.instagram.com/direct/t/${threadId}/`, { waitUntil: "domcontentloaded" });
+      await delay(3500);
+      await this._dismissDialogs();
+      await this.page.waitForSelector(DM_COMPOSER, { state: "visible", timeout: 15000 }).catch(async () => {
+        const labels = await this._visibleButtonLabels();
+        throw new Error(`sendMessageInThread: no message box in thread ${threadId} (buttons: ${labels.join(", ") || "none"})`);
+      });
+      await this._typeAndSend(this.page.locator(DM_COMPOSER).first(), text);
+
+      const result = { success: true, threadId, message: text, timestamp: new Date().toISOString() };
+      this._recordAction("dm");
+      this.emit("dmSent", result);
+      return result;
+    } catch (err) {
+      this.emit("dmFailed", { threadId, error: err.message });
+      throw err;
+    }
+  },
+
+  /** Type into a DM box and send. Line breaks become Shift+Enter; Enter alone sends. @private */
+  async _typeAndSend(box, text) {
+    await box.click();
+    await delay(500);
+    const lines = String(text).split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0) await box.press("Shift+Enter");
+      if (lines[i]) await box.type(lines[i], { delay: 50 });
+    }
+    await delay(800);
+    await box.press("Enter");
+    await delay(2500);
   },
 
   /**
@@ -604,6 +643,7 @@ module.exports = {
    * @param {boolean} [options.emitExisting=false] - emit the current backlog on start
    * @param {boolean} [options.enrichSender=false] - add bio/followers/story to sender
    * @param {boolean} [options.requests=true]      - also emit pending message requests
+   * @param {number}  [options.since]              - resume: emit messages newer than this (ms)
    */
   async startMessageListener(options = {}) {
     this._ensureReady();
@@ -618,15 +658,18 @@ module.exports = {
     const emitExisting = !!options.emitExisting;
     const enrichSender = !!options.enrichSender;
     const requests = options.requests !== false;
+    // Resume after a restart: emit messages newer than `since` (ms) instead of
+    // treating everything before the start as history.
+    const since = Number(options.since) > 0 && !emitExisting ? Number(options.since) : 0;
 
     this._msgSeen = new Set();
     this._threadLatest = {};
     this._requestLatest = {};
-    this._msgSinceTs = emitExisting ? 0 : Date.now();
+    this._msgSinceTs = emitExisting ? 0 : (since || Date.now());
     this._msgStatus = { mode, ok: null, at: null, error: null, failures: 0, threads: null, lastEventAt: null };
     this._msgPage = await this.context.newPage();
 
-    let seeded = false;
+    let seeded = !!since;
     let lastRead = 0;
     let rerun = false;
 
@@ -682,6 +725,7 @@ module.exports = {
     // messages emitted. The activity is marked handled only after the thread read.
     const scan = async () => {
       const summaries = await this._fetchInboxSummary(this._msgPage, limit);
+      let changed = 0;
 
       if (!seeded && !emitExisting) {
         // First read with default options: remember each thread's latest activity
@@ -691,6 +735,8 @@ module.exports = {
       } else {
         for (const s of summaries) {
           if (!s.latestItemId || this._threadLatest[s.threadId] === s.latestItemId) continue; // no change
+          changed++;
+          if (!emitExisting && Number(s.latestItemId) <= this._msgSinceTs) { this._threadLatest[s.threadId] = s.latestItemId; continue; }
           const batch = await collect(s, emitExisting ? 0 : this._msgSinceTs);
           this._threadLatest[s.threadId] = s.latestItemId;
           if (!batch) continue;
@@ -707,28 +753,41 @@ module.exports = {
         // thread moves to the inbox; its messages were already emitted here.
         for (const s of await this._fetchRequestSummary(this._msgPage, limit)) {
           if (!s.latestItemId || this._requestLatest[s.threadId] === s.latestItemId) continue;
+          changed++;
           const batch = await collect(s, 0);
           this._requestLatest[s.threadId] = s.latestItemId;
           if (batch) this.emit("messageRequest", batch);
         }
       }
-      return summaries;
+      return { summaries, changed };
     };
 
     // Never two reads at once; a trigger that arrives during a read schedules one
     // more, so a message landing mid-read is not left for the safety check.
     const read = async () => {
-      if (!this._msgPage) return;
-      if (this._msgPolling) { rerun = true; return; }
+      if (!this._msgPage) return null;
+      if (this._msgPolling) { rerun = true; return null; }
       this._msgPolling = true;
+      let changed = null;
       try {
         do {
           rerun = false;
           lastRead = Date.now();
-          try { this._msgReadSucceeded(await scan()); }
-          catch (err) { this._msgReadFailed(err); }
+          try { const r = await scan(); changed = r.changed; this._msgReadSucceeded(r.summaries); }
+          catch (err) { changed = null; this._msgReadFailed(err); }
         } while (rerun && this._msgPage);
       } finally { this._msgPolling = false; }
+      return changed;
+    };
+
+    // The socket can announce a message a moment before the inbox query shows it;
+    // if an event-triggered read finds nothing new, look again a little later.
+    const readAfterEvent = async (attempt = 0) => {
+      const changed = await read();
+      if (changed === 0 && attempt < EVENT_FOLLOWUP_MS.length && this._msgPage) {
+        clearTimeout(this._msgFollowup);
+        this._msgFollowup = setTimeout(() => readAfterEvent(attempt + 1), EVENT_FOLLOWUP_MS[attempt]);
+      }
     };
 
     if (mode === "realtime") {
@@ -742,7 +801,8 @@ module.exports = {
           if (((frame.payload && frame.payload.length) || 0) < REALTIME_EVENT_BYTES) return;
           this._msgStatus.lastEventAt = new Date().toISOString();
           clearTimeout(this._msgDebounce);
-          this._msgDebounce = setTimeout(read, REALTIME_DEBOUNCE_MS); // one read per burst
+          clearTimeout(this._msgFollowup);
+          this._msgDebounce = setTimeout(() => readAfterEvent(), REALTIME_DEBOUNCE_MS); // one read per burst
         });
       });
       // Opens the DM page: its own queries become the templates, and it stays open.
@@ -849,6 +909,7 @@ module.exports = {
   async stopMessageListener() {
     if (this._msgTimer) { clearInterval(this._msgTimer); this._msgTimer = null; }
     clearTimeout(this._msgDebounce);
+    clearTimeout(this._msgFollowup);
     if (this._msgPage) { await this._msgPage.close().catch(() => {}); this._msgPage = null; }
     this._msgPolling = false;
     this.emit("messageListenerStopped");

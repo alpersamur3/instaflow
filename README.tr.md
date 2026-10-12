@@ -315,7 +315,10 @@ Bir hashtag altındaki en iyi gönderileri kazır ve `count` kadarını (varsay�
 Bir hesabı takip et / takipten çık.
 
 #### `bot.sendDM(username, message)` → `DMResult`
-Bir kullanıcıya direkt mesaj gönderir.
+Bir kullanıcıya direkt mesaj gönderir. `message` içindeki satır sonları tek mesajın içinde kalır.
+
+#### `bot.sendMessageInThread(threadId, message)` → `DMResult`
+Var olan bir sohbetin içine mesaj gönderir; örneğin bir `userMessages` ya da `messageRequest` olayının `threadId`'si. Profildeki Mesaj butonu yerine doğrudan sohbete gider, cevap vermenin güvenilir yolu budur. Mesaj isteği önce kabul edilmelidir.
 
 #### `bot.viewStory(username)` → `Result`
 Bir kullanıcının aktif hikayesini açar ve izler (görüntüleme olarak sayılır).
@@ -326,14 +329,14 @@ Bir kullanıcının aktif hikayesine emoji ile tepki verir.
 #### `bot.reactToMessage(threadId, target?, emoji?)` → `Result`
 Bir DM mesajına emoji ile tepki verir (hızlı set: ❤️ 😂 😮 😢 😡 👍; varsayılan ❤️). `target` mesajın **metni**, bir `{ text }` veya bir `messageReceived` mesaj nesnesi olabilir; vermezsen thread'deki son gelen metin mesajına tepki verir. Listener ile doğal uyum:
 
-#### `bot.acceptMessageRequest(threadId)` → `Result`
-Bekleyen bir mesaj isteğini kabul eder. Kabul edilene kadar sohbette sadece Engelle / Sil / Kabul et vardır ve cevap yazılamaz. Zaten kabul edilmiş bir sohbette çağrılırsa `alreadyAccepted: true` ile başarılı döner.
-
 ```js
 bot.on('messageReceived', (msg) => {
   if (msg.type === 'reel') bot.reactToMessage(msg.threadId, msg, '😂');
 });
 ```
+
+#### `bot.acceptMessageRequest(threadId)` → `Result`
+Bekleyen bir mesaj isteğini kabul eder. Kabul edilene kadar sohbette sadece Engelle / Sil / Kabul et vardır ve cevap yazılamaz. Zaten kabul edilmiş bir sohbette çağrılırsa `alreadyAccepted: true` ile başarılı döner.
 
 ---
 
@@ -372,7 +375,9 @@ Yani Alper bir döngüde 3, Mehmet 2 mesaj atarsa: 5 `messageReceived` **ve** 2
 `userMessages` olayı alırsın (Alper'in 3'ü bir dizi, sonra Mehmet'in 2'si).
 
 #### `bot.startMessageListener(options?)`
-Dinlemeyi başlatır. Seçenekler: `mode` (`'realtime'` varsayılandır ve Instagram'ın soketini dinler; `'poll'` her `interval`'da ucuz okunmamış sayısını okur, gelen kutusunu yalnız o değişince okur), `interval` (ms, poll modu, varsayılan 6000), `fullInterval` (iki gelen kutusu okuması arasındaki en uzun süre; realtime 5 dk, poll 1 dk), `limit` (okuma başına thread, varsayılan 20), `threadLimit` (aktif thread başına çekilen mesaj, varsayılan 25), `includeSelf` (varsayılan false), `emitExisting` (başlangıçta mevcut birikimi yay, varsayılan false), `enrichSender` (`sender`'a bio/takipçi sayıları/hikaye durumu ekler, her yeni gönderen için +1 istek, varsayılan false).
+Dinlemeyi başlatır. Seçenekler: `mode` (`'realtime'` varsayılandır ve Instagram'ın soketini dinler; `'poll'` her `interval`'da ucuz okunmamış sayısını okur, gelen kutusunu yalnız o değişince okur), `interval` (ms, poll modu, varsayılan 6000), `fullInterval` (iki gelen kutusu okuması arasındaki en uzun süre; realtime 5 dk, poll 1 dk), `limit` (okuma başına thread, varsayılan 20), `threadLimit` (aktif thread başına çekilen mesaj, varsayılan 25), `includeSelf` (varsayılan false), `emitExisting` (başlangıçta mevcut birikimi yay, varsayılan false), `enrichSender` (`sender`'a bio/takipçi sayıları/hikaye durumu ekler, her yeni gönderen için +1 istek, varsayılan false), `since` (yeniden başlatmadan sonra kaldığı yerden devam: bu zamandan (ms) yeni mesajlar geçmiş sayılmaz, ilk okumada yayılır; işlediğin son mesajın zamanını sakla ve buraya ver).
+
+Soket bir mesajı gelen kutusu sorgusu onu göstermeden biraz önce haber verebilir. Olayın tetiklediği okuma yeni bir şey bulamazsa gelen kutusuna 4 ve 12 saniye sonra tekrar bakılır.
 
 Hatalar yutulmaz, bildirilir: `messageListenerError` (`{ error, failures }`) ilk başarısız okumada ve art arda her 30'uncuda, `messageListenerRecovered` okuma yeniden çalışınca, `messageListenerReconnected` soket sessiz kaldığı için DM sayfası yeniden açılınca tetiklenir.
 
